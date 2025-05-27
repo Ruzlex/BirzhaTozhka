@@ -1,9 +1,8 @@
 from fastapi import FastAPI, Depends
 from .database import engine, Base
-from .routers import users, instruments, balances, orders
+from .routers import users, instruments, balances, orders, public_transactions
 from .dependencies import check_auth_headers
-from .initialize_db import initialize_base_currency
-
+from .initialize_db import initialize_db
 
 
 description = """
@@ -11,29 +10,17 @@ description = """
 
 ## Начало работы
 
-1. Зарегистрируйтесь через эндпоинт `/api/v1/public/register` (для обычного пользователя) или `/api/v1/public/register-admin` (для администратора).
+1. Зарегистрируйтесь через эндпоинт `/api/v1/public/register` (для пользователя) или `/api/v1/public/register-admin` (для администратора).
 2. Получите API-ключ из ответа.
 3. Используйте полученный ключ в заголовке **Authorization** для доступа к защищенным эндпоинтам.
 
-### Формат заголовка Authorization
+## Возможности
 
-```
-Authorization: TOKEN your-api-key
-```
-
-## Типы пользователей
-
-- **USER** - обычный пользователь, имеет доступ к базовым операциям.
-- **ADMIN** - администратор, имеет доступ ко всем эндпоинтам включая управление инструментами.
-
-## Торговые операции
-
-Платформа позволяет торговать различными инструментами за виртуальные рубли (RUB).
-Вы можете:
-- Просматривать свой баланс
-- Создавать заявки на покупку или продажу инструментов
-- Просматривать биржевой стакан
-- Отменять свои активные заявки
+- Управление профилем и просмотр балансов
+- Размещение лимитных и рыночных заявок
+- Просмотр ордербука по инструментам
+- Получение публичной истории сделок
+- Отмена своих активных заявок
 
 ## Проблемы с авторизацией?
 
@@ -41,7 +28,7 @@ Authorization: TOKEN your-api-key
 """
 
 app = FastAPI(
-    title="Биржа игрушек", 
+    title="Биржа игрушек",
     version="0.1.0",
     description=description,
 )
@@ -94,7 +81,7 @@ async def debug_headers(headers_info: dict = Depends(check_auth_headers)):
 Base.metadata.create_all(bind=engine)
 
 # Инициализация начальных данных
-initialize_base_currency()
+initialize_db()
 
 # Подключение маршрутов
 app.include_router(users.router)
@@ -106,3 +93,4 @@ app.include_router(balances.router)
 app.include_router(balances.admin_router)
 app.include_router(orders.router)
 app.include_router(orders.protected_router)
+app.include_router(public_transactions.router)
