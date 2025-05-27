@@ -71,6 +71,12 @@ def delete_instrument(
     instrument = db.query(models.Instrument).filter(models.Instrument.ticker == ticker).first()
     if not instrument:
         raise HTTPException(status_code=404, detail="Инструмент не найден.")
+
+    # Удаляем связанные балансы
+    db.query(models.Balance).filter(models.Balance.ticker == ticker).delete()
+    # Удаляем связанные ордера
+    db.query(models.Order).filter(models.Order.ticker == ticker).delete()
+
     db.delete(instrument)
     db.commit()
     return {"success": True}

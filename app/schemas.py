@@ -187,8 +187,8 @@ class OrderStatus(str, Enum):
 
 class OrderCreate(BaseModel):
     ticker: str
-    side: OrderSide
-    quantity: Decimal = Field(..., gt=0)
+    side: OrderSide = Field(..., alias="direction")
+    quantity: Decimal = Field(..., gt=0, alias="qty")
     price: Optional[Decimal] = Field(None, gt=0)
     
     @property
