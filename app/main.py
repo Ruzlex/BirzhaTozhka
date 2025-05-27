@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends
 from .database import engine, Base
 from .routers import users, instruments, balances, orders, public_transactions
 from .dependencies import check_auth_headers
-from .initialize_db import initialize_db
+from .initialize_db import initialize_base_currency
 
 
 description = """
@@ -81,7 +81,7 @@ async def debug_headers(headers_info: dict = Depends(check_auth_headers)):
 Base.metadata.create_all(bind=engine)
 
 # Инициализация начальных данных
-initialize_db()
+initialize_base_currency()
 
 # Подключение маршрутов
 app.include_router(users.router)

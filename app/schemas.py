@@ -22,57 +22,29 @@ class UserOut(BaseModel):
         "from_attributes": True
     }
 
-class UserCreate(BaseModel):
-    name: str = Field(..., min_length=3)
-    email: EmailStr
-    password: str = Field(..., min_length=6)
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str = Field(..., min_length=6)
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
+# В OpenAPI схема Instrument содержит только name и ticker
 class Instrument(BaseModel):
+    ticker: str = Field(..., pattern="^[A-Z]{2,10}$")
     name: str
-    ticker: str = Field(..., regex="^[A-Z]{2,10}$")
-
-class InstrumentDB(Instrument):
-    id: int
 
     model_config = {
         "from_attributes": True
     }
 
-class InstrumentCreate(BaseModel):
+# Сохраним расширенную схему для внутреннего использования
+class InstrumentDB(BaseModel):
+    id: int
+    ticker: str
     name: str
-    ticker: str = Field(..., regex="^[A-Z]{2,10}$")
+    instrument_type: str = "stock"
+    commission_rate: Decimal = 0.0
+    initial_price: Decimal = 0.0
+    available_quantity: int = 0
+    is_listed: bool = True
 
-class InstrumentUpdate(BaseModel):
-    name: Optional[str]
-    ticker: Optional[str] = Field(None, regex="^[A-Z]{2,10}$")
-
-class BalanceBase(BaseModel):
-    ticker: str
-    amount: Decimal
-
-class BalanceOut(BalanceBase):
-    pass
-
-class DepositRequest(BaseModel):
-    user_id: UUID
-    ticker: str
-    amount: int = Field(..., gt=0)
-
-class WithdrawRequest(BaseModel):
-    user_id: UUID
-    ticker: str
-    amount: int = Field(..., gt=0)
-
-class BalanceResponse(BaseModel):
-    __root__: Dict[str, int]
+    model_config = {
+        "from_attributes": True
+    }
 
 class Ok(BaseModel):
     success: bool = True
@@ -95,47 +67,11 @@ class L2OrderBook(BaseModel):
     bid_levels: List[Level]
     ask_levels: List[Level]
 
-class OrderType(str, Enum):
-    LIMIT = "LIMIT"
-    MARKET = "MARKET"
-
-class OrderSide(str, Enum):
-    BUY = "BUY"
-    SELL = "SELL"
-
-class OrderCreate(BaseModel):
-    type: OrderType
-    side: OrderSide
-    ticker: str
-    qty: int = Field(..., ge=1)
-    price: Optional[int] = Field(None, gt=0)
-
-class OrderOut(BaseModel):
-    id: UUID
-    user_id: UUID
-    instrument_id: int
-    order_type: OrderType
-    side: OrderSide
-    quantity: Decimal
-    price: Optional[Decimal]
-    status: OrderStatus
-    filled_quantity: Decimal
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {
-        "from_attributes": True
-    }
-
 class Transaction(BaseModel):
     ticker: str
     amount: int
     price: int
     timestamp: datetime
-
-    model_config = {
-        "from_attributes": True
-    }
 
 class LimitOrderBody(BaseModel):
     direction: Direction
@@ -167,75 +103,116 @@ class CreateOrderResponse(BaseModel):
     success: bool = True
     order_id: str
 
-class InstrumentCreate(BaseModel):
-    name: str
+class BalanceOperation(BaseModel):
+    user_id: str
     ticker: str
+    amount: int = Field(..., gt=0)
 
-class InstrumentDetails(InstrumentCreate):
-    id: int
-
-class BalanceBase(BaseModel):
-    ticker: str
-    amount: int
-
-class BalanceOut(BalanceBase):
+# Схемы для инструментов
+class InstrumentCreate(Instrument):
     pass
 
-class DepositRequest(BaseModel):
-    user_id: UUID
+class InstrumentDetails(Instrument):
+    instrument_type: str = "stock"
+    commission_rate: float = 0.0
+    initial_price: float = 0.0
+    available_quantity: int = 0
+    is_listed: bool = True
+
+    model_config = {
+        "from_attributes": True
+    }
+
+# Схемы для балансов
+class BalanceBase(BaseModel):
     ticker: str
-    amount: int
+    amount: Decimal
+
+    @field_validator('amount')
+    def amount_must_be_positive(cls, v):
+        if v < 0:
+            raise ValueError('Сумма должна быть положительной')
+        return v
+
+class BalanceOut(BalanceBase):
+    instrument_name: Optional[str] = None
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+class DepositRequest(BaseModel):
+    ticker: str
+    amount: Decimal
+    
+    @field_validator('amount')
+    def amount_must_be_positive(cls, v):
+        if v <= 0:
+            raise ValueError('Сумма должна быть положительной')
+        return v
 
 class WithdrawRequest(BaseModel):
-    user_id: UUID
     ticker: str
-    amount: int
+    amount: Decimal
+    
+    @field_validator('amount')
+    def amount_must_be_positive(cls, v):
+        if v <= 0:
+            raise ValueError('Сумма должна быть положительной')
+        return v
 
 class BalanceResponse(BaseModel):
-    __root__: Dict[str, int]
+    success: bool
+    balance: Optional[Decimal] = None
+    message: Optional[str] = None
 
+# Общие
 class Ok(BaseModel):
     success: bool = True
 
+# Ордеры
 class OrderType(str, Enum):
     LIMIT = "LIMIT"
     MARKET = "MARKET"
-
 
 class OrderSide(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
 
 class OrderStatus(str, Enum):
-    NEW = "NEW"
-    EXECUTED = "EXECUTED"
-    PARTIALLY_EXECUTED = "PARTIALLY_EXECUTED"
+    OPEN = "OPEN"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
     CANCELLED = "CANCELLED"
 
 class OrderCreate(BaseModel):
-    type: OrderType
-    side: OrderSide
     ticker: str
-    qty: int
-    price: Optional[int]
+    side: OrderSide
+    quantity: Decimal = Field(..., gt=0)
+    price: Optional[Decimal] = Field(None, gt=0)
+    
+    @property
+    def order_type(self) -> OrderType:
+        """Автоматически определяет тип ордера на основе наличия цены"""
+        return OrderType.LIMIT if self.price is not None else OrderType.MARKET
 
 class OrderOut(BaseModel):
-    id: UUID
-    user_id: UUID
-    instrument_id: int
-    order_type: OrderType
+    id: str
+    ticker: str
     side: OrderSide
+    order_type: OrderType
     quantity: Decimal
-    price: Optional[Decimal]
-    status: OrderStatus
+    price: Optional[Decimal] = None
     filled_quantity: Decimal
+    status: OrderStatus
     created_at: datetime
     updated_at: datetime
-
+    
     model_config = {
         "from_attributes": True
     }
 
+# Биржевой стакан
 class OrderBookItem(BaseModel):
     price: Decimal
     quantity: Decimal
