@@ -1,0 +1,8 @@
+# Игнорировать папки __pycache__
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Игнорировать настройки VS Code
+.vscode/
