@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-
+venv
+.venv
 # Игнорировать настройки VS Code
 .vscode/
