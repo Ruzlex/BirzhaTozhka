@@ -90,3 +90,16 @@ class Order(Base):
     user = relationship("User", back_populates="orders")
     instrument = relationship("Instrument", foreign_keys=[instrument_id], back_populates="orders")
     instrument_by_ticker = relationship("Instrument", foreign_keys=[ticker], viewonly=True)
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    instrument_id = Column(Integer, ForeignKey("instruments.id"), nullable=False)
+    price = Column(Numeric(precision=18, scale=8), nullable=False)
+    quantity = Column(Numeric(precision=18, scale=8), nullable=False)
+    buyer_id = Column(String, ForeignKey("users.id"), nullable=False)
+    seller_id = Column(String, ForeignKey("users.id"), nullable=False)
+    buy_order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    sell_order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
