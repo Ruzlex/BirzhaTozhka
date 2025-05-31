@@ -131,6 +131,8 @@ def delete_user(
         "api_key": user.api_key
     }
     
+    # Удаляем связанные балансы
+    db.query(models.Balance).filter(models.Balance.user_id == user_id).delete()
     # Удаляем пользователя
     db.delete(user)
     db.commit()
