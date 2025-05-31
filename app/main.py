@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
 from .database import engine, Base
 from .routers import users, instruments, balances, orders, public_transactions
 from .dependencies import check_auth_headers
@@ -76,6 +76,13 @@ async def debug_headers(headers_info: dict = Depends(check_auth_headers)):
     Используйте этот эндпоинт, чтобы убедиться, что заголовок авторизации правильно передается.
     """
     return headers_info
+
+@app.middleware("http")
+async def log_request_body(request: Request, call_next):
+    body = await request.body()
+    print(f"REQUEST {request.method} {request.url.path} BODY: {body.decode('utf-8', errors='replace')}")
+    response = await call_next(request)
+    return response
 
 # Инициализация базы данных
 Base.metadata.create_all(bind=engine)
