@@ -58,8 +58,8 @@ class Balance(Base):
     __tablename__ = "balances"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
-    ticker = Column(String, ForeignKey("instruments.ticker"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    ticker = Column(String, ForeignKey("instruments.ticker"), nullable=False, index=True)
     amount = Column(Numeric(precision=18, scale=8), nullable=False, default=0)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -71,9 +71,9 @@ class Order(Base):
     __tablename__ = "orders"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
-    instrument_id = Column(Integer, ForeignKey("instruments.id"), nullable=False)
-    ticker = Column(String, ForeignKey("instruments.ticker"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    instrument_id = Column(Integer, ForeignKey("instruments.id"), nullable=False, index=True)
+    ticker = Column(String, ForeignKey("instruments.ticker"), nullable=False, index=True)
     
     order_type = Column(Enum(OrderType), nullable=False)
     side = Column(Enum(OrderSide), nullable=False)
@@ -95,11 +95,11 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    instrument_id = Column(Integer, ForeignKey("instruments.id"), nullable=False)
+    instrument_id = Column(Integer, ForeignKey("instruments.id"), nullable=False, index=True)
     price = Column(Numeric(precision=18, scale=8), nullable=False)
     quantity = Column(Numeric(precision=18, scale=8), nullable=False)
-    buyer_id = Column(String, ForeignKey("users.id"), nullable=False)
-    seller_id = Column(String, ForeignKey("users.id"), nullable=False)
-    buy_order_id = Column(String, ForeignKey("orders.id"), nullable=False)
-    sell_order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    buyer_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    seller_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    buy_order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)
+    sell_order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
