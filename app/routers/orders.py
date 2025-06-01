@@ -190,7 +190,7 @@ def create_order(
     # Перезагружаем ордер, чтобы получить актуальный статус после матчинга
     db.refresh(new_order)
     
-    return new_order
+    return {"success": True, "order_id": new_order.id}
 
 @protected_router.get("", response_model=List[schemas.OrderOut])
 def list_orders(
