@@ -73,7 +73,7 @@ def get_orderbook(
 # Защищенный роутер для работы с ордерами (требует авторизации)
 protected_router = APIRouter(prefix="/api/v1/order", tags=["order"])
 
-@protected_router.post("", response_model=schemas.OrderOut)
+@protected_router.post("", response_model=schemas.CreateOrderResponse)
 def create_order(
     order: schemas.OrderCreate,
     current_user: models.User = Depends(get_current_user),
