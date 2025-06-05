@@ -74,8 +74,11 @@ def delete_instrument(
 
     # Удаляем связанные балансы
     db.query(models.Balance).filter(models.Balance.ticker == ticker).delete()
-    # Удаляем связанные ордера
-    db.query(models.Order).filter(models.Order.ticker == ticker).delete()
+    # Удаляем связанные ордера через ORM
+    orders = db.query(models.Order).filter(models.Order.ticker == ticker).all()
+    for order in orders:
+        db.delete(order)
+    db.commit()
 
     db.delete(instrument)
     db.commit()
