@@ -114,13 +114,10 @@ def create_order(
             models.Balance.ticker == "RUB"
         ).first()
         if not rub_balance:
-            rub_balance = models.Balance(
-                user_id=current_user.id,
-                ticker="RUB",
-                amount=0
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="У вас нет баланса в RUB"
             )
-            db.add(rub_balance)
-            db.flush()
         # Для лимитного ордера нужно зарезервировать точную сумму
         if order_type == schemas.OrderType.LIMIT:
             required_amount = order.price * order.quantity
@@ -142,16 +139,8 @@ def create_order(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
         ).first()
-        if not asset_balance:
-            asset_balance = models.Balance(
-                user_id=current_user.id,
-                ticker=order.ticker,
-                amount=0
-            )
-            db.add(asset_balance)
-            db.flush()
-        if asset_balance.amount < order.quantity:
-            available = asset_balance.amount
+        if not asset_balance or asset_balance.amount < order.quantity:
+            available = asset_balance.amount if asset_balance else 0
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Недостаточно {order.ticker}. Требуется: {order.quantity}, доступно: {available}"
