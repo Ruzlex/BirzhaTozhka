@@ -113,13 +113,14 @@ def create_order(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == "RUB"
         ).first()
-        
         if not rub_balance:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="У вас нет баланса в RUB"
+            rub_balance = models.Balance(
+                user_id=current_user.id,
+                ticker="RUB",
+                amount=0
             )
-        
+            db.add(rub_balance)
+            db.flush()
         # Для лимитного ордера нужно зарезервировать точную сумму
         if order_type == schemas.OrderType.LIMIT:
             required_amount = order.price * order.quantity
@@ -141,9 +142,16 @@ def create_order(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
         ).first()
-        
-        if not asset_balance or asset_balance.amount < order.quantity:
-            available = asset_balance.amount if asset_balance else 0
+        if not asset_balance:
+            asset_balance = models.Balance(
+                user_id=current_user.id,
+                ticker=order.ticker,
+                amount=0
+            )
+            db.add(asset_balance)
+            db.flush()
+        if asset_balance.amount < order.quantity:
+            available = asset_balance.amount
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Недостаточно {order.ticker}. Требуется: {order.quantity}, доступно: {available}"
@@ -263,18 +271,30 @@ def cancel_order(
                 models.Balance.user_id == current_user.id,
                 models.Balance.ticker == "RUB"
             ).first()
-            
-            if rub_balance:
-                rub_balance.amount += remaining_quantity * order.price
+            if not rub_balance:
+                rub_balance = models.Balance(
+                    user_id=current_user.id,
+                    ticker="RUB",
+                    amount=0
+                )
+                db.add(rub_balance)
+                db.flush()
+            rub_balance.amount += remaining_quantity * order.price
         elif order.side == models.OrderSide.SELL:
             # Возвращаем актив
             asset_balance = db.query(models.Balance).filter(
                 models.Balance.user_id == current_user.id,
                 models.Balance.ticker == order.ticker
             ).first()
-            
-            if asset_balance:
-                asset_balance.amount += remaining_quantity
+            if not asset_balance:
+                asset_balance = models.Balance(
+                    user_id=current_user.id,
+                    ticker=order.ticker,
+                    amount=0
+                )
+                db.add(asset_balance)
+                db.flush()
+            asset_balance.amount += remaining_quantity
     
     # Отмечаем ордер как отмененный
     order.status = models.OrderStatus.CANCELLED
@@ -472,18 +492,30 @@ def cancel_order_and_return_funds(db: Session, order_id: str):
                 models.Balance.user_id == order.user_id,
                 models.Balance.ticker == "RUB"
             ).first()
-            
-            if rub_balance:
-                rub_balance.amount += remaining_quantity * order.price
+            if not rub_balance:
+                rub_balance = models.Balance(
+                    user_id=order.user_id,
+                    ticker="RUB",
+                    amount=0
+                )
+                db.add(rub_balance)
+                db.flush()
+            rub_balance.amount += remaining_quantity * order.price
         elif order.side == models.OrderSide.SELL:
             # Возвращаем актив
             asset_balance = db.query(models.Balance).filter(
                 models.Balance.user_id == order.user_id,
                 models.Balance.ticker == order.ticker
             ).first()
-            
-            if asset_balance:
-                asset_balance.amount += remaining_quantity
+            if not asset_balance:
+                asset_balance = models.Balance(
+                    user_id=order.user_id,
+                    ticker=order.ticker,
+                    amount=0
+                )
+                db.add(asset_balance)
+                db.flush()
+            asset_balance.amount += remaining_quantity
     
     order.status = models.OrderStatus.CANCELLED
     order.updated_at = datetime.datetime.utcnow()
