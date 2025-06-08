@@ -64,8 +64,8 @@ def get_orderbook(
 
     # Формируем ответ
     result = {
-        "bids": [{"price": price, "quantity": qty} for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)],
-        "asks": [{"price": price, "quantity": qty} for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])]
+        "bid_levels": [{"price": price, "quantity": qty} for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)],
+        "ask_levels": [{"price": price, "quantity": qty} for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])]
     }
     
     return result
@@ -344,6 +344,9 @@ def execute_matching(db: Session, order_id: str):
                 models.Order.side == models.OrderSide.BUY,
                 models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
             ).order_by(desc(models.Order.price)).all()
+
+        if order.order_type == models.OrderType.MARKET and not counter_orders:
+            raise ValueError(f"Нет встречных заявок для исполнения рыночного ордера {order.id}")
     
     # Итеративно выполняем сделки
     for counter_order in counter_orders:
@@ -378,6 +381,17 @@ def execute_matching(db: Session, order_id: str):
     # Для рыночных ордеров, если остался неисполненный объем, отменяем его
     if order.order_type == models.OrderType.MARKET and order_remaining > 0:
         order.status = models.OrderStatus.CANCELLED if order.filled_quantity == 0 else models.OrderStatus.PARTIALLY_FILLED
+    
+    if order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
+        refund_quantity = order.quantity - order.filled_quantity
+        if refund_quantity > 0:
+            refund_amount = refund_quantity * order.price
+            rub_balance = db.query(models.Balance).filter(
+                models.Balance.user_id == order.user_id,
+                models.Balance.ticker == "RUB"
+            ).first()
+            if rub_balance:
+                rub_balance.amount += refund_amount
     
     db.commit()
 
