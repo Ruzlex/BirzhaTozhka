@@ -64,8 +64,8 @@ def get_orderbook(
 
     # Формируем ответ
     result = {
-        "bid_levels": [{"price": price, "quantity": qty} for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)],
-        "ask_levels": [{"price": price, "quantity": qty} for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])]
+        "bids": [{"price": price, "quantity": qty} for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)],
+        "asks": [{"price": price, "quantity": qty} for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])]
     }
     
     return result
