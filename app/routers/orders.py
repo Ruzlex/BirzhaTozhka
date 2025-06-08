@@ -128,10 +128,25 @@ def create_order(
                 )
         # Для рыночного ордера проверяем, что баланс просто положительный
         else:
-            if rub_balance.amount <= 0:
+            # Проверяем, что в стакане есть заявки на продажу
+            sell_orders = db.query(models.Order).filter(
+                models.Order.ticker == order.ticker,
+                models.Order.side == models.OrderSide.SELL,
+                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+            ).order_by(asc(models.Order.price)).all()
+
+            if not sell_orders:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Недостаточно средств для рыночной покупки"
+                    detail="Невозможно выполнить рыночную покупку — нет встречных ордеров"
+                )
+
+            # Проверяем, достаточно ли RUB хотя бы на 1 единицу по минимальной цене
+            min_price = sell_orders[0].price
+            if rub_balance.amount < min_price:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Недостаточно средств для рыночной покупки. Минимальная цена: {min_price} RUB, доступно: {rub_balance.amount}"
                 )
     else:  # SELL
         # Находим баланс инструмента
@@ -327,6 +342,8 @@ def execute_matching(db: Session, order_id: str):
                 models.Order.side == models.OrderSide.SELL,
                 models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
             ).order_by(asc(models.Order.price)).all()
+            if not counter_orders:
+                raise ValueError(f"Нет встречных заявок для исполнения рыночного ордера {order.id}")
     else:
         # Ищем заявки на покупку
         if order.order_type == models.OrderType.LIMIT:
@@ -392,6 +409,16 @@ def execute_matching(db: Session, order_id: str):
             ).first()
             if rub_balance:
                 rub_balance.amount += refund_amount
+
+    if order.side == models.OrderSide.SELL and order.order_type == models.OrderType.LIMIT:
+        refund_quantity = order.quantity - order.filled_quantity
+        if refund_quantity > 0:
+            asset_balance = db.query(models.Balance).filter(
+                models.Balance.user_id == order.user_id,
+                models.Balance.ticker == order.ticker
+            ).first()
+            if asset_balance:
+                asset_balance.amount += refund_quantity
     
     db.commit()
 

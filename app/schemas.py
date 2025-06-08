@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, ConfigDict
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List, Dict, Any, Literal, Union
@@ -64,8 +64,10 @@ class Level(BaseModel):
     qty: int
 
 class L2OrderBook(BaseModel):
-    bid_levels: List[Level]
-    ask_levels: List[Level]
+    bid_levels: List[Level] = Field(..., alias="bids")
+    ask_levels: List[Level] = Field(..., alias="asks")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 class Transaction(BaseModel):
     ticker: str
