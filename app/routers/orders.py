@@ -61,14 +61,12 @@ def get_orderbook(
             ask_levels[price] += ask.quantity - ask.filled_quantity
         else:
             ask_levels[price] = ask.quantity - ask.filled_quantity
-
-    # Формируем ответ
-    result = {
-        "bids": [{"price": price, "quantity": qty} for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)],
-        "asks": [{"price": price, "quantity": qty} for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])]
-    }
     
-    return result
+    return schemas.L2OrderBook(bid_levels=[
+        schemas.Level(price=price, qty=int(qty)) for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
+    ], ask_levels=[
+        schemas.Level(price=price, qty=int(qty)) for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
+    ])
 
 # Защищенный роутер для работы с ордерами (требует авторизации)
 protected_router = APIRouter(prefix="/api/v1/order", tags=["order"])
@@ -118,6 +116,11 @@ def create_order(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="У вас нет баланса в RUB"
             )
+        if order.price is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Цена лимитного ордера не может быть пустой"
+            )
         # Для лимитного ордера нужно зарезервировать точную сумму
         if order_type == schemas.OrderType.LIMIT:
             required_amount = order.price * order.quantity
@@ -154,7 +157,7 @@ def create_order(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
         ).first()
-        if not asset_balance or asset_balance.amount < order.quantity:
+        if not asset_balance or asset_balance.amount is None or asset_balance.amount < Decimal(order.quantity):
             available = asset_balance.amount if asset_balance else 0
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -191,12 +194,17 @@ def create_order(
     # Выполняем матчинг ордера
     try:
         execute_matching(db, new_order.id)
+    except ValueError as e:
+        cancel_order_and_return_funds(db, new_order.id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     except Exception as e:
-        # В случае ошибки при матчинге, отменяем ордер и возвращаем средства
         cancel_order_and_return_funds(db, new_order.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ошибка при выполнении матчинга: {str(e)}"
+            detail=f"Внутренняя ошибка при исполнении ордера: {str(e)}"
         )
     
     # Перезагружаем ордер, чтобы получить актуальный статус после матчинга
