@@ -62,11 +62,16 @@ def get_orderbook(
         else:
             ask_levels[price] = ask.quantity - ask.filled_quantity
     
-    return schemas.L2OrderBook(bid_levels=[
-        schemas.Level(price=price, qty=int(qty)) for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
-    ], ask_levels=[
-        schemas.Level(price=price, qty=int(qty)) for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
-    ])
+    return schemas.OrderBookOut(
+    bid_levels=[
+        schemas.OrderBookItem(price=price, quantity=qty)
+        for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
+    ],
+    ask_levels=[
+        schemas.OrderBookItem(price=price, quantity=qty)
+        for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
+    ]
+)
 
 # Защищенный роутер для работы с ордерами (требует авторизации)
 protected_router = APIRouter(prefix="/api/v1/order", tags=["order"])
@@ -93,7 +98,7 @@ def create_order(
         )
     
     # Определяем тип ордера на основе наличия цены
-    order_type = schemas.OrderType.LIMIT if order.price is not None else schemas.OrderType.MARKET
+    order_type = order.order_type
     
     # Базовая валюта системы - RUB
     rub_instrument = db.query(models.Instrument).filter(models.Instrument.ticker == "RUB").first()
@@ -152,17 +157,31 @@ def create_order(
                     detail=f"Недостаточно средств для рыночной покупки. Минимальная цена: {min_price} RUB, доступно: {rub_balance.amount}"
                 )
     else:  # SELL
-        # Находим баланс инструмента
         asset_balance = db.query(models.Balance).filter(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
         ).first()
-        if not asset_balance or asset_balance.amount is None or asset_balance.amount < Decimal(order.quantity):
-            available = asset_balance.amount if asset_balance else 0
+
+        asset_amount = asset_balance.amount if asset_balance and asset_balance.amount is not None else Decimal("0")
+
+        if asset_amount < order.quantity:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Недостаточно {order.ticker}. Требуется: {order.quantity}, доступно: {available}"
+                detail=f"Недостаточно {order.ticker}. Требуется: {order.quantity}, доступно: {asset_amount}"
             )
+        
+        if order_type == schemas.OrderType.MARKET:
+            buy_orders = db.query(models.Order).filter(
+                models.Order.ticker == order.ticker,
+                models.Order.side == models.OrderSide.BUY,
+                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+            ).order_by(desc(models.Order.price)).all()
+
+            if not buy_orders:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Невозможно выполнить рыночную продажу — нет встречных ордеров"
+                )
     
     # Создаем новый ордер
     new_order = models.Order(
@@ -275,23 +294,30 @@ def cancel_order(
     
     # Возвращаем зарезервированные средства
     remaining_quantity = order.quantity - order.filled_quantity
-    
+
     if remaining_quantity > 0:
-        if order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
-            # Возвращаем рубли
-            rub_balance = db.query(models.Balance).filter(
-                models.Balance.user_id == current_user.id,
-                models.Balance.ticker == "RUB"
-            ).first()
-            if not rub_balance:
-                rub_balance = models.Balance(
-                    user_id=current_user.id,
-                    ticker="RUB",
-                    amount=0
-                )
-                db.add(rub_balance)
-                db.flush()
-            rub_balance.amount += remaining_quantity * order.price
+        if order.side == models.OrderSide.BUY:
+            # Возвращаем рубли только для лимитных ордеров
+            if order.order_type == models.OrderType.LIMIT:
+                if order.price is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Ордер типа LIMIT не содержит цену"
+                    )
+                rub_balance = db.query(models.Balance).filter(
+                    models.Balance.user_id == current_user.id,
+                    models.Balance.ticker == "RUB"
+                ).first()
+                if not rub_balance:
+                    rub_balance = models.Balance(
+                        user_id=current_user.id,
+                        ticker="RUB",
+                        amount=0
+                    )
+                    db.add(rub_balance)
+                    db.flush()
+                rub_balance.amount += remaining_quantity * order.price
+
         elif order.side == models.OrderSide.SELL:
             # Возвращаем актив
             asset_balance = db.query(models.Balance).filter(
@@ -371,7 +397,10 @@ def execute_matching(db: Session, order_id: str):
             ).order_by(desc(models.Order.price)).all()
 
         if order.order_type == models.OrderType.MARKET and not counter_orders:
-            raise ValueError(f"Нет встречных заявок для исполнения рыночного ордера {order.id}")
+            raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Нет встречных заявок для исполнения рыночного ордера {order.id}"
+        )
     
     # Итеративно выполняем сделки
     for counter_order in counter_orders:

@@ -220,5 +220,9 @@ class OrderBookItem(BaseModel):
     quantity: Decimal
 
 class OrderBookOut(BaseModel):
-    bids: List[OrderBookItem]  # Заявки на покупку (по убыванию цены)
-    asks: List[OrderBookItem]  # Заявки на продажу (по возрастанию цены)
+    bid_levels: List[OrderBookItem] = Field(..., alias="bids")
+    ask_levels: List[OrderBookItem] = Field(..., alias="asks")
+
+    model_config = {
+        "populate_by_name": True
+    }
