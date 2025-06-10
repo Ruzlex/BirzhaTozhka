@@ -35,42 +35,50 @@ def get_orderbook(
     bids = db.query(models.Order).filter(
         models.Order.ticker == ticker,
         models.Order.side == models.OrderSide.BUY,
-        models.Order.status == models.OrderStatus.OPEN
-    ).order_by(desc(models.Order.price)).limit(limit).all()
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+    ).order_by(desc(models.Order.price)).all()
     
     # Получаем заявки на продажу (по возрастанию цены - самые низкие вверху)
     asks = db.query(models.Order).filter(
         models.Order.ticker == ticker,
         models.Order.side == models.OrderSide.SELL,
-        models.Order.status == models.OrderStatus.OPEN
-    ).order_by(asc(models.Order.price)).limit(limit).all()
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+    ).order_by(asc(models.Order.price)).all()
     
-    # Агрегируем объемы по ценам
+    # Агрегируем объемы по ценам для покупок
     bid_levels = {}
     for bid in bids:
-        price = bid.price
-        if price in bid_levels:
-            bid_levels[price] += bid.quantity - bid.filled_quantity
-        else:
-            bid_levels[price] = bid.quantity - bid.filled_quantity
+        remaining_qty = bid.quantity - bid.filled_quantity
+        if remaining_qty > 0:  # Пропускаем полностью исполненные ордера
+            price = bid.price
+            if price in bid_levels:
+                bid_levels[price] += remaining_qty
+            else:
+                bid_levels[price] = remaining_qty
 
+    # Агрегируем объемы по ценам для продаж
     ask_levels = {}
     for ask in asks:
-        price = ask.price
-        if price in ask_levels:
-            ask_levels[price] += ask.quantity - ask.filled_quantity
-        else:
-            ask_levels[price] = ask.quantity - ask.filled_quantity
+        remaining_qty = ask.quantity - ask.filled_quantity
+        if remaining_qty > 0:  # Пропускаем полностью исполненные ордера
+            price = ask.price
+            if price in ask_levels:
+                ask_levels[price] += remaining_qty
+            else:
+                ask_levels[price] = remaining_qty
     
+    # Формируем отсортированные списки уровней, пропуская нулевые объемы
     return schemas.OrderBookOut(
         bid_levels=[
             schemas.Level(price=price, qty=qty)
             for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
-        ],
+            if qty > 0
+        ][:limit],  # Ограничиваем количество уровней
         ask_levels=[
             schemas.Level(price=price, qty=qty)
             for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
-        ]
+            if qty > 0
+        ][:limit]   # Ограничиваем количество уровней
     )
 
 # Защищенный роутер для работы с ордерами (требует авторизации)
