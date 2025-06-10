@@ -70,6 +70,10 @@ class L2OrderBook(BaseModel):
     
     model_config = ConfigDict(populate_by_name=True)
 
+# Обязательно добавляем это в конец файла, после всех остальных определений
+class OrderBookOut(L2OrderBook):
+    pass
+
 class Transaction(BaseModel):
     ticker: str
     amount: int
