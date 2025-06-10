@@ -63,9 +63,10 @@ class Level(BaseModel):
     price: Decimal
     qty: Decimal
 
+# Биржевой стакан
 class L2OrderBook(BaseModel):
-    bid_levels: List[Level] = Field(..., alias="bids")
-    ask_levels: List[Level] = Field(..., alias="asks")
+    bid_levels: List[Level]
+    ask_levels: List[Level]
     
     model_config = ConfigDict(populate_by_name=True)
 
@@ -213,11 +214,3 @@ class OrderOut(BaseModel):
     model_config = {
         "from_attributes": True
     }
-
-# Биржевой стакан
-class OrderBookItem(BaseModel):
-    price: Decimal
-    quantity: Decimal
-
-class OrderBookOut(L2OrderBook):
-    pass

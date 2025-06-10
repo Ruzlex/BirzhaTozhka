@@ -63,15 +63,15 @@ def get_orderbook(
             ask_levels[price] = ask.quantity - ask.filled_quantity
     
     return schemas.OrderBookOut(
-    bids=[
-        schemas.Level(price=price, qty=qty)
-        for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
-    ],
-    asks=[
-        schemas.Level(price=price, qty=qty)
-        for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
-    ]
-)
+        bid_levels=[
+            schemas.Level(price=price, qty=qty)
+            for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
+        ],
+        ask_levels=[
+            schemas.Level(price=price, qty=qty)
+            for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
+        ]
+    )
 
 # Защищенный роутер для работы с ордерами (требует авторизации)
 protected_router = APIRouter(prefix="/api/v1/order", tags=["order"])
@@ -148,24 +148,49 @@ def create_order(
                     detail="Невозможно выполнить рыночную покупку — нет встречных ордеров"
                 )
 
-            # Проверяем, достаточно ли незарезервированных RUB
-            min_price = sell_orders[0].price
-            if available_rub < min_price:
+            # Проверяем достаточно ли предложений на продажу для исполнения ордера
+            total_available = sum(so.quantity - so.filled_quantity for so in sell_orders)
+            if total_available < order.quantity:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Недостаточно средств для рыночной покупки. Минимальная цена: {min_price} RUB, доступно: {available_rub} RUB (с учетом зарезервированных)"
+                    detail=f"Недостаточно предложений для покупки. Запрошено: {order.quantity}, доступно в стакане: {total_available}"
                 )
-                
+
+            # Считаем возможную стоимость исполнения
+            remaining_to_buy = order.quantity
+            estimated_cost = Decimal(0)
+            
+            for sell_order in sell_orders:
+                available_from_order = sell_order.quantity - sell_order.filled_quantity
+                matching_quantity = min(remaining_to_buy, available_from_order)
+                estimated_cost += matching_quantity * sell_order.price
+                remaining_to_buy -= matching_quantity
+                if remaining_to_buy <= 0:
+                    break
+            
+            # Проверяем, достаточно ли незарезервированных RUB
+            if available_rub < estimated_cost:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Недостаточно средств для рыночной покупки. Требуется примерно: {estimated_cost} RUB, доступно: {available_rub} RUB (с учетом зарезервированных)"
+                )
+
     else:  # SELL
         asset_balance = db.query(models.Balance).filter(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
         ).first()
         
-        asset_amount = asset_balance.amount if asset_balance else Decimal("0")
+        # Проверяем существование баланса
+        if not asset_balance:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"У вас нет баланса в {order.ticker}"
+            )
+            
         # Получаем сумму, зарезервированную в других ордерах на продажу
         reserved_asset = get_reserved_balance(db, current_user.id, order.ticker)
-        available_asset = asset_amount - reserved_asset
+        available_asset = asset_balance.amount - reserved_asset
 
         if available_asset < order.quantity:
             raise HTTPException(
@@ -184,6 +209,14 @@ def create_order(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Невозможно выполнить рыночную продажу — нет встречных ордеров"
+                )
+
+            # Проверяем достаточно ли спроса на покупку для исполнения ордера
+            total_demand = sum(bo.quantity - bo.filled_quantity for bo in buy_orders)
+            if total_demand < order.quantity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Невозможно исполнить рыночный ордер - недостаточно спроса. Запрошено: {order.quantity}, доступно в стакане: {total_demand}"
                 )
     
     # Создаем новый ордер
