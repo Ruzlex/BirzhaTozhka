@@ -63,12 +63,12 @@ def get_orderbook(
             ask_levels[price] = ask.quantity - ask.filled_quantity
     
     return schemas.OrderBookOut(
-    bid_levels=[
-        schemas.OrderBookItem(price=price, quantity=qty)
+    bids=[
+        schemas.Level(price=price, qty=qty)
         for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
     ],
-    ask_levels=[
-        schemas.OrderBookItem(price=price, quantity=qty)
+    asks=[
+        schemas.Level(price=price, qty=qty)
         for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
     ]
 )
@@ -108,30 +108,34 @@ def create_order(
             detail="Базовая валюта RUB не найдена в системе"
         )
     
-    # Проверяем достаточность средств
-    # При ПОКУПКЕ нужно проверить баланс рублей, при ПРОДАЖЕ - баланс инструмента
+    # Проверяем достаточность средств с учетом зарезервированных
     if order.side == schemas.OrderSide.BUY:
         # Находим рублевый баланс пользователя
         rub_balance = db.query(models.Balance).filter(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == "RUB"
         ).first()
+        
         if not rub_balance:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="У вас нет баланса в RUB"
             )
-        # Для лимитного ордера нужно зарезервировать точную сумму
+            
+        # Получаем сумму, зарезервированную в других ордерах на покупку
+        reserved_rub = get_reserved_balance(db, current_user.id, "RUB")
+        available_rub = rub_balance.amount - reserved_rub
+        
+        # Для лимитного ордера нужно проверить точную сумму
         if order_type == schemas.OrderType.LIMIT:
             required_amount = order.price * order.quantity
-            if rub_balance.amount < required_amount:
+            if available_rub < required_amount:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Недостаточно средств. Требуется: {required_amount} RUB, доступно: {rub_balance.amount} RUB"
+                    detail=f"Недостаточно средств. Требуется: {required_amount} RUB, доступно: {available_rub} RUB (с учетом зарезервированных)"
                 )
-        # Для рыночного ордера проверяем, что баланс просто положительный
+        # Для рыночного ордера проверяем наличие встречных ордеров
         else:
-            # Проверяем, что в стакане есть заявки на продажу
             sell_orders = db.query(models.Order).filter(
                 models.Order.ticker == order.ticker,
                 models.Order.side == models.OrderSide.SELL,
@@ -144,27 +148,31 @@ def create_order(
                     detail="Невозможно выполнить рыночную покупку — нет встречных ордеров"
                 )
 
-            # Проверяем, достаточно ли RUB хотя бы на 1 единицу по минимальной цене
+            # Проверяем, достаточно ли незарезервированных RUB
             min_price = sell_orders[0].price
-            if rub_balance.amount < min_price:
+            if available_rub < min_price:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Недостаточно средств для рыночной покупки. Минимальная цена: {min_price} RUB, доступно: {rub_balance.amount}"
+                    detail=f"Недостаточно средств для рыночной покупки. Минимальная цена: {min_price} RUB, доступно: {available_rub} RUB (с учетом зарезервированных)"
                 )
+                
     else:  # SELL
         asset_balance = db.query(models.Balance).filter(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
         ).first()
+        
+        asset_amount = asset_balance.amount if asset_balance else Decimal("0")
+        # Получаем сумму, зарезервированную в других ордерах на продажу
+        reserved_asset = get_reserved_balance(db, current_user.id, order.ticker)
+        available_asset = asset_amount - reserved_asset
 
-        asset_amount = asset_balance.amount if asset_balance and asset_balance.amount is not None else Decimal("0")
-
-        if asset_amount < order.quantity:
+        if available_asset < order.quantity:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Недостаточно {order.ticker}. Требуется: {order.quantity}, доступно: {asset_amount}"
+                detail=f"Недостаточно {order.ticker}. Требуется: {order.quantity}, доступно: {available_asset} (с учетом зарезервированных)"
             )
-        
+            
         if order_type == schemas.OrderType.MARKET:
             buy_orders = db.query(models.Order).filter(
                 models.Order.ticker == order.ticker,
@@ -582,4 +590,27 @@ def cancel_order_and_return_funds(db: Session, order_id: str):
     order.status = models.OrderStatus.CANCELLED
     order.updated_at = datetime.datetime.utcnow()
     
-    db.commit() 
+    db.commit()
+
+def get_reserved_balance(db: Session, user_id: str, ticker: str) -> Decimal:
+    """
+    Подсчитывает сумму зарезервированного баланса в открытых ордерах.
+    """
+    reserved = Decimal(0)
+    
+    # Находим все открытые ордера пользователя для данного тикера
+    open_orders = db.query(models.Order).filter(
+        models.Order.user_id == user_id,
+        models.Order.ticker == ticker,
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+    ).all()
+    
+    for order in open_orders:
+        if order.side == models.OrderSide.SELL:
+            # Для ордеров на продажу резервируется количество актива
+            reserved += order.quantity - order.filled_quantity
+        elif order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
+            # Для лимитных ордеров на покупку резервируются рубли
+            reserved += (order.quantity - order.filled_quantity) * order.price
+            
+    return reserved

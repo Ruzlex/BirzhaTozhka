@@ -60,13 +60,13 @@ class OrderStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 class Level(BaseModel):
-    price: int
-    qty: int
+    price: Decimal
+    qty: Decimal
 
 class L2OrderBook(BaseModel):
     bid_levels: List[Level] = Field(..., alias="bids")
     ask_levels: List[Level] = Field(..., alias="asks")
-
+    
     model_config = ConfigDict(populate_by_name=True)
 
 class Transaction(BaseModel):
@@ -219,10 +219,5 @@ class OrderBookItem(BaseModel):
     price: Decimal
     quantity: Decimal
 
-class OrderBookOut(BaseModel):
-    bid_levels: List[OrderBookItem] = Field(..., alias="bids")
-    ask_levels: List[OrderBookItem] = Field(..., alias="asks")
-
-    model_config = {
-        "populate_by_name": True
-    }
+class OrderBookOut(L2OrderBook):
+    pass
