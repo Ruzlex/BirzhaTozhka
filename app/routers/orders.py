@@ -121,11 +121,6 @@ def create_order(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="У вас нет баланса в RUB"
             )
-        if order.price is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Цена лимитного ордера не может быть пустой"
-            )
         # Для лимитного ордера нужно зарезервировать точную сумму
         if order_type == schemas.OrderType.LIMIT:
             required_amount = order.price * order.quantity
