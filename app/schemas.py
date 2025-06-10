@@ -60,15 +60,33 @@ class OrderStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 class Level(BaseModel):
-    price: Decimal
-    qty: Decimal
+    price: Decimal = Field(..., gt=0)
+    qty: Decimal = Field(..., gt=0)
+
+    @field_validator('price')
+    def validate_price(cls, v):
+        if v <= 0:
+            raise ValueError('Цена должна быть положительной')
+        return v
+
+    @field_validator('qty')
+    def validate_qty(cls, v):
+        if v <= 0:
+            raise ValueError('Количество должно быть положительным')
+        return v
 
 # Биржевой стакан
 class L2OrderBook(BaseModel):
-    bid_levels: List[Level]
-    ask_levels: List[Level]
+    bid_levels: List[Level] = Field(default_factory=list)
+    ask_levels: List[Level] = Field(default_factory=list)
     
     model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator('bid_levels', 'ask_levels')
+    def validate_levels(cls, v):
+        if not isinstance(v, list):
+            raise ValueError('Уровни должны быть списком')
+        return v
 
 # Обязательно добавляем это в конец файла, после всех остальных определений
 class OrderBookOut(L2OrderBook):
@@ -196,7 +214,19 @@ class OrderCreate(BaseModel):
     ticker: str
     side: OrderSide = Field(..., alias="direction")
     quantity: Decimal = Field(..., gt=0, alias="qty")
-    price: Optional[Decimal] = Field(None, gt=0)
+    price: Optional[Decimal] = Field(None)
+    
+    @field_validator('price')
+    def validate_price(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('Цена должна быть положительной')
+        return v
+    
+    @field_validator('quantity')
+    def validate_quantity(cls, v):
+        if v <= 0:
+            raise ValueError('Количество должно быть положительным')
+        return v
     
     @property
     def order_type(self) -> OrderType:

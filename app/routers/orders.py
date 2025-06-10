@@ -19,7 +19,6 @@ def get_orderbook(
 ):
     """
     Получить текущий биржевой стакан (книгу заявок) для указанного инструмента.
-    
     Возвращает списки активных заявок на покупку (bids) и продажу (asks),
     отсортированные по наиболее выгодной цене.
     """
@@ -31,54 +30,64 @@ def get_orderbook(
             detail=f"Инструмент с тикером {ticker} не найден"
         )
     
-    # Получаем заявки на покупку (по убыванию цены - самые высокие вверху)
-    bids = db.query(models.Order).filter(
+    # Получаем активные ордера на покупку с положительным остатком
+    buy_orders = db.query(models.Order).filter(
         models.Order.ticker == ticker,
         models.Order.side == models.OrderSide.BUY,
-        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
-    ).order_by(desc(models.Order.price)).all()
-    
-    # Получаем заявки на продажу (по возрастанию цены - самые низкие вверху)
-    asks = db.query(models.Order).filter(
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
+        (models.Order.quantity - models.Order.filled_quantity) > 0  # Добавляем проверку на положительный остаток
+    ).all()
+
+    # Получаем активные ордера на продажу с положительным остатком
+    sell_orders = db.query(models.Order).filter(
         models.Order.ticker == ticker,
         models.Order.side == models.OrderSide.SELL,
-        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
-    ).order_by(asc(models.Order.price)).all()
-    
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
+        (models.Order.quantity - models.Order.filled_quantity) > 0  # Добавляем проверку на положительный остаток
+    ).all()
+
     # Агрегируем объемы по ценам для покупок
     bid_levels = {}
-    for bid in bids:
-        remaining_qty = bid.quantity - bid.filled_quantity
-        if remaining_qty > 0:  # Пропускаем полностью исполненные ордера
-            price = bid.price
-            if price in bid_levels:
-                bid_levels[price] += remaining_qty
-            else:
-                bid_levels[price] = remaining_qty
+    for order in buy_orders:
+        remaining_qty = order.quantity - order.filled_quantity
+        if remaining_qty <= 0:
+            continue
+        if order.price not in bid_levels:
+            bid_levels[order.price] = Decimal('0')
+        bid_levels[order.price] += remaining_qty
 
     # Агрегируем объемы по ценам для продаж
     ask_levels = {}
-    for ask in asks:
-        remaining_qty = ask.quantity - ask.filled_quantity
-        if remaining_qty > 0:  # Пропускаем полностью исполненные ордера
-            price = ask.price
-            if price in ask_levels:
-                ask_levels[price] += remaining_qty
-            else:
-                ask_levels[price] = remaining_qty
-    
-    # Формируем отсортированные списки уровней, пропуская нулевые объемы
+    for order in sell_orders:
+        remaining_qty = order.quantity - order.filled_quantity
+        if remaining_qty <= 0:
+            continue
+        if order.price not in ask_levels:
+            ask_levels[order.price] = Decimal('0')
+        ask_levels[order.price] += remaining_qty
+
+    # Сортируем уровни и применяем лимит
+    sorted_bids = sorted(
+        [
+            schemas.Level(price=price, qty=qty)
+            for price, qty in bid_levels.items()
+            if qty > 0  # Дополнительная проверка на положительный объем
+        ],
+        key=lambda x: (-x.price, -x.qty)  # Сортируем по убыванию цены, при равных ценах - по убыванию объема
+    )[:limit]
+
+    sorted_asks = sorted(
+        [
+            schemas.Level(price=price, qty=qty)
+            for price, qty in ask_levels.items()
+            if qty > 0  # Дополнительная проверка на положительный объем
+        ],
+        key=lambda x: (x.price, -x.qty)  # Сортируем по возрастанию цены, при равных ценах - по убыванию объема
+    )[:limit]
+
     return schemas.OrderBookOut(
-        bid_levels=[
-            schemas.Level(price=price, qty=qty)
-            for price, qty in sorted(bid_levels.items(), key=lambda x: x[0], reverse=True)
-            if qty > 0
-        ][:limit],  # Ограничиваем количество уровней
-        ask_levels=[
-            schemas.Level(price=price, qty=qty)
-            for price, qty in sorted(ask_levels.items(), key=lambda x: x[0])
-            if qty > 0
-        ][:limit]   # Ограничиваем количество уровней
+        bid_levels=sorted_bids,
+        ask_levels=sorted_asks
     )
 
 # Защищенный роутер для работы с ордерами (требует авторизации)
@@ -134,53 +143,46 @@ def create_order(
         reserved_rub = get_reserved_balance(db, current_user.id, "RUB")
         available_rub = rub_balance.amount - reserved_rub
         
-        # Для лимитного ордера нужно проверить точную сумму
+        if available_rub <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Нет доступных средств. Весь баланс зарезервирован в других ордерах."
+            )
+        
+        # Для лимитного ордера проверяем точную сумму
         if order_type == schemas.OrderType.LIMIT:
             required_amount = order.price * order.quantity
             if available_rub < required_amount:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Недостаточно средств. Требуется: {required_amount} RUB, доступно: {available_rub} RUB (с учетом зарезервированных)"
+                    detail=(
+                        f"Недостаточно средств. "
+                        f"Требуется: {required_amount} RUB, "
+                        f"всего на балансе: {rub_balance.amount} RUB, "
+                        f"зарезервировано: {reserved_rub} RUB, "
+                        f"доступно: {available_rub} RUB"
+                    )
                 )
-        # Для рыночного ордера проверяем наличие встречных ордеров
+        # Для рыночного ордера проверяем возможность исполнения
         else:
-            sell_orders = db.query(models.Order).filter(
-                models.Order.ticker == order.ticker,
-                models.Order.side == models.OrderSide.SELL,
-                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
-            ).order_by(asc(models.Order.price)).all()
-
-            if not sell_orders:
+            can_execute, error_msg, estimated_cost = check_market_order_executable(
+                db, order.ticker, order.side, order.quantity
+            )
+            if not can_execute:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Невозможно выполнить рыночную покупку — нет встречных ордеров"
+                    detail=error_msg
                 )
-
-            # Проверяем достаточно ли предложений на продажу для исполнения ордера
-            total_available = sum(so.quantity - so.filled_quantity for so in sell_orders)
-            if total_available < order.quantity:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Недостаточно предложений для покупки. Запрошено: {order.quantity}, доступно в стакане: {total_available}"
-                )
-
-            # Считаем возможную стоимость исполнения
-            remaining_to_buy = order.quantity
-            estimated_cost = Decimal(0)
-            
-            for sell_order in sell_orders:
-                available_from_order = sell_order.quantity - sell_order.filled_quantity
-                matching_quantity = min(remaining_to_buy, available_from_order)
-                estimated_cost += matching_quantity * sell_order.price
-                remaining_to_buy -= matching_quantity
-                if remaining_to_buy <= 0:
-                    break
-            
-            # Проверяем, достаточно ли незарезервированных RUB
             if available_rub < estimated_cost:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Недостаточно средств для рыночной покупки. Требуется примерно: {estimated_cost} RUB, доступно: {available_rub} RUB (с учетом зарезервированных)"
+                    detail=(
+                        f"Недостаточно средств для рыночной покупки. "
+                        f"Требуется примерно: {estimated_cost} RUB, "
+                        f"всего на балансе: {rub_balance.amount} RUB, "
+                        f"зарезервировано: {reserved_rub} RUB, "
+                        f"доступно: {available_rub} RUB"
+                    )
                 )
 
     else:  # SELL
@@ -189,7 +191,6 @@ def create_order(
             models.Balance.ticker == order.ticker
         ).first()
         
-        # Проверяем существование баланса
         if not asset_balance:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -199,33 +200,24 @@ def create_order(
         # Получаем сумму, зарезервированную в других ордерах на продажу
         reserved_asset = get_reserved_balance(db, current_user.id, order.ticker)
         available_asset = asset_balance.amount - reserved_asset
+        
+        if available_asset <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Нет доступных {order.ticker}. Весь баланс зарезервирован в других ордерах."
+            )
 
         if available_asset < order.quantity:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Недостаточно {order.ticker}. Требуется: {order.quantity}, доступно: {available_asset} (с учетом зарезервированных)"
+                detail=(
+                    f"Недостаточно {order.ticker}. "
+                    f"Требуется: {order.quantity}, "
+                    f"всего на балансе: {asset_balance.amount}, "
+                    f"зарезервировано: {reserved_asset}, "
+                    f"доступно: {available_asset}"
+                )
             )
-            
-        if order_type == schemas.OrderType.MARKET:
-            buy_orders = db.query(models.Order).filter(
-                models.Order.ticker == order.ticker,
-                models.Order.side == models.OrderSide.BUY,
-                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
-            ).order_by(desc(models.Order.price)).all()
-
-            if not buy_orders:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Невозможно выполнить рыночную продажу — нет встречных ордеров"
-                )
-
-            # Проверяем достаточно ли спроса на покупку для исполнения ордера
-            total_demand = sum(bo.quantity - bo.filled_quantity for bo in buy_orders)
-            if total_demand < order.quantity:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Невозможно исполнить рыночный ордер - недостаточно спроса. Запрошено: {order.quantity}, доступно в стакане: {total_demand}"
-                )
     
     # Создаем новый ордер
     new_order = models.Order(
@@ -655,3 +647,62 @@ def get_reserved_balance(db: Session, user_id: str, ticker: str) -> Decimal:
             reserved += (order.quantity - order.filled_quantity) * order.price
             
     return reserved
+
+def check_market_order_executable(
+    db: Session,
+    ticker: str,
+    side: models.OrderSide,
+    quantity: Decimal
+) -> tuple[bool, str, Decimal]:
+    """
+    Проверяет возможность исполнения рыночного ордера.
+    Возвращает (можно_исполнить, сообщение_об_ошибке, расчетная_стоимость)
+    """
+    counter_side = models.OrderSide.SELL if side == models.OrderSide.BUY else models.OrderSide.BUY
+    price_order = asc if side == models.OrderSide.BUY else desc
+    
+    # Получаем все встречные ордера с положительным остатком
+    counter_orders = db.query(models.Order).filter(
+        models.Order.ticker == ticker,
+        models.Order.side == counter_side,
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
+        (models.Order.quantity - models.Order.filled_quantity) > 0  # Добавляем проверку на положительный остаток
+    ).order_by(price_order(models.Order.price)).all()
+
+    if not counter_orders:
+        return False, f"Невозможно исполнить рыночный ордер - нет активных встречных заявок", Decimal(0)
+
+    available_volume = sum(
+        order.quantity - order.filled_quantity 
+        for order in counter_orders
+    )
+    
+    if available_volume < quantity:
+        return False, (
+            f"Невозможно исполнить рыночный ордер - недостаточно "
+            f"{'предложений' if side == models.OrderSide.BUY else 'спроса'}. "
+            f"Запрошено: {quantity}, доступно: {available_volume}"
+        ), Decimal(0)
+
+    # Рассчитываем примерную стоимость исполнения и проверяем ликвидность
+    remaining = quantity
+    total_cost = Decimal(0)
+    matched_orders = 0
+    
+    for order in counter_orders:
+        available = order.quantity - order.filled_quantity
+        if available <= 0:
+            continue
+            
+        matched = min(remaining, available)
+        total_cost += matched * order.price
+        remaining -= matched
+        matched_orders += 1
+        
+        if remaining <= 0:
+            break
+
+    if matched_orders == 0:
+        return False, "Недостаточно ликвидности для исполнения рыночного ордера", Decimal(0)
+
+    return True, "", total_cost
