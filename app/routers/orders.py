@@ -134,11 +134,10 @@ def create_order(
         ).first()
         
         if not rub_balance or rub_balance.amount <= 0:
-            if order_type == schemas.OrderType.LIMIT:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Недостаточно средств для покупки"
-                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Недостаточно средств для покупки"
+            )
             
         # Получаем сумму, зарезервированную в других ордерах на покупку
         reserved_rub = get_reserved_balance(db, current_user.id, "RUB")
@@ -166,14 +165,11 @@ def create_order(
                 )
         # Для рыночного ордера проверяем возможность исполнения
         else:
-            can_execute, error_msg, estimated_cost = check_market_order_executable(
+            can_execute, _, _ = check_market_order_executable(
                 db, order.ticker, order.side, order.quantity
             )
             if not can_execute:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Нет встречных заявок для исполнения рыночного ордера"
-                )
+                raise ValueError("Нет встречных заявок для исполнения рыночного ордера")
 
     else:  # SELL
         # Проверяем баланс актива
@@ -212,14 +208,11 @@ def create_order(
 
         # Для рыночного ордера проверяем возможность исполнения
         if order_type == schemas.OrderType.MARKET:
-            can_execute, error_msg, _ = check_market_order_executable(
+            can_execute, _, _ = check_market_order_executable(
                 db, order.ticker, order.side, order.quantity
             )
             if not can_execute:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Нет встречных заявок для исполнения рыночного ордера"
-                )
+                raise ValueError("Нет встречных заявок для исполнения рыночного ордера")
     
     # Создаем новый ордер
     new_order = models.Order(
@@ -390,6 +383,14 @@ def execute_matching(db: Session, order_id: str):
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
         raise ValueError(f"Ордер с ID {order_id} не найден")
+        
+    if order.order_type == models.OrderType.MARKET:
+        # Для рыночного ордера проверяем наличие встречных заявок
+        can_execute, _, _ = check_market_order_executable(
+            db, order.ticker, order.side, order.quantity
+        )
+        if not can_execute:
+            raise ValueError("Нет встречных заявок для исполнения рыночного ордера")
     
     # Если ордер не открыт, нечего матчить
     if order.status != models.OrderStatus.OPEN:
