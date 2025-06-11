@@ -31,36 +31,46 @@ def get_orderbook(
         )
     
     # Получаем активные лимитные ордера на покупку (BID)
-    buy_orders = db.query(models.Order).filter(
-        models.Order.ticker == ticker,
-        models.Order.side == models.OrderSide.BUY,
-        models.Order.order_type == models.OrderType.LIMIT,
-        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
-        models.Order.quantity > models.Order.filled_quantity
-    ).order_by(
-        desc(models.Order.price),
-        asc(models.Order.created_at)
-    ).all()
+    buy_orders = (
+        db.query(models.Order)
+        .filter(
+            models.Order.ticker == ticker,
+            models.Order.side == models.OrderSide.BUY,
+            models.Order.order_type == models.OrderType.LIMIT,
+            models.Order.status == models.OrderStatus.OPEN,  # Только OPEN
+            models.Order.quantity > models.Order.filled_quantity  # Должен быть остаток
+        )
+        .order_by(
+            desc(models.Order.price),
+            asc(models.Order.created_at)
+        )
+        .all()
+    )
 
     # Получаем активные лимитные ордера на продажу (ASK)
-    sell_orders = db.query(models.Order).filter(
-        models.Order.ticker == ticker,
-        models.Order.side == models.OrderSide.SELL,
-        models.Order.order_type == models.OrderType.LIMIT,
-        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
-        models.Order.quantity > models.Order.filled_quantity
-    ).order_by(
-        asc(models.Order.price),
-        asc(models.Order.created_at)
-    ).all()
+    sell_orders = (
+        db.query(models.Order)
+        .filter(
+            models.Order.ticker == ticker,
+            models.Order.side == models.OrderSide.SELL,
+            models.Order.order_type == models.OrderType.LIMIT,
+            models.Order.status == models.OrderStatus.OPEN,  # Только OPEN
+            models.Order.quantity > models.Order.filled_quantity  # Должен быть остаток
+        )
+        .order_by(
+            asc(models.Order.price),
+            asc(models.Order.created_at)
+        )
+        .all()
+    )
 
     # Агрегируем объемы по ценам для покупок (BID)
     bid_levels = {}
     for order in buy_orders:
-        if order.price is None:  # Пропускаем ордера без цены
-            continue
         remaining_qty = order.quantity - order.filled_quantity
-        if remaining_qty <= 0:  # Пропускаем полностью исполненные
+        if remaining_qty <= 0:  # Дополнительная проверка
+            continue
+        if order.price is None:  # Пропускаем ордера без цены
             continue
         price_key = Decimal(str(order.price))  # Конвертируем в Decimal для точности
         if price_key not in bid_levels:
@@ -70,32 +80,28 @@ def get_orderbook(
     # Агрегируем объемы по ценам для продаж (ASK)
     ask_levels = {}
     for order in sell_orders:
-        if order.price is None:  # Пропускаем ордера без цены
-            continue
         remaining_qty = order.quantity - order.filled_quantity
-        if remaining_qty <= 0:  # Пропускаем полностью исполненные
+        if remaining_qty <= 0:  # Дополнительная проверка
+            continue
+        if order.price is None:  # Пропускаем ордера без цены
             continue
         price_key = Decimal(str(order.price))  # Конвертируем в Decimal для точности
         if price_key not in ask_levels:
             ask_levels[price_key] = Decimal('0')
         ask_levels[price_key] += remaining_qty
 
-    # Формируем и сортируем уровни
+    # Убираем пустые уровни и уровни с количеством <= 0
+    bid_levels = {k: v for k, v in bid_levels.items() if v > 0}
+    ask_levels = {k: v for k, v in ask_levels.items() if v > 0}
+
+    # Сортируем уровни и применяем лимит
     sorted_bids = sorted(
-        [
-            schemas.Level(price=price, qty=qty)
-            for price, qty in bid_levels.items()
-            if qty > 0
-        ],
+        [schemas.Level(price=price, qty=qty) for price, qty in bid_levels.items()],
         key=lambda x: (-x.price, -x.qty)
     )[:limit]
 
     sorted_asks = sorted(
-        [
-            schemas.Level(price=price, qty=qty)
-            for price, qty in ask_levels.items()
-            if qty > 0
-        ],
+        [schemas.Level(price=price, qty=qty) for price, qty in ask_levels.items()],
         key=lambda x: (x.price, -x.qty)
     )[:limit]
 
@@ -378,67 +384,72 @@ def execute_matching(db: Session, order_id: str):
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
         raise ValueError(f"Ордер с ID {order_id} не найден")
-        
-    if order.order_type == models.OrderType.MARKET:
-        # Для рыночного ордера проверяем наличие встречных заявок
-        can_execute, _, _ = check_market_order_executable(
-            db, order.ticker, order.side, order.quantity
-        )
-        if not can_execute:
-            raise ValueError("Нет встречных заявок для исполнения рыночного ордера")
     
-    # Если ордер не открыт, нечего матчить
+    # Проверяем статус ордера
     if order.status != models.OrderStatus.OPEN:
         return
     
-    # Для рыночных ордеров ищем любые встречные заявки
-    # Для лимитных - только с подходящей ценой
-    if order.side == models.OrderSide.BUY:
-        # Ищем заявки на продажу
-        if order.order_type == models.OrderType.LIMIT:
-            # Для лимитного ордера на покупку подходят заявки на продажу с ценой <= цены ордера
-            counter_orders = db.query(models.Order).filter(
-                models.Order.ticker == order.ticker,
-                models.Order.side == models.OrderSide.SELL,
-                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
-                models.Order.price <= order.price
-            ).order_by(asc(models.Order.price)).all()
-        else:
-            # Для рыночного ордера на покупку подходят любые заявки на продажу
-            counter_orders = db.query(models.Order).filter(
-                models.Order.ticker == order.ticker,
-                models.Order.side == models.OrderSide.SELL,
-                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
-            ).order_by(asc(models.Order.price)).all()
-            if not counter_orders:
-                raise ValueError(f"Нет встречных заявок для исполнения рыночного ордера {order.id}")
-    else:
-        # Ищем заявки на покупку
-        if order.order_type == models.OrderType.LIMIT:
-            # Для лимитного ордера на продажу подходят заявки на покупку с ценой >= цены ордера
-            counter_orders = db.query(models.Order).filter(
-                models.Order.ticker == order.ticker,
-                models.Order.side == models.OrderSide.BUY,
-                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
-                models.Order.price >= order.price
-            ).order_by(desc(models.Order.price)).all()
-        else:
-            # Для рыночного ордера на продажу подходят любые заявки на покупку
-            counter_orders = db.query(models.Order).filter(
-                models.Order.ticker == order.ticker,
-                models.Order.side == models.OrderSide.BUY,
-                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
-            ).order_by(desc(models.Order.price)).all()
-
-        if order.order_type == models.OrderType.MARKET and not counter_orders:
-            raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Нет встречных заявок для исполнения рыночного ордера {order.id}"
+    # Для рыночных ордеров проверяем наличие встречных заявок
+    if order.order_type == models.OrderType.MARKET:
+        can_execute, error_msg, _ = check_market_order_executable(
+            db, order.ticker, order.side, order.quantity
         )
+        if not can_execute:
+            raise ValueError(error_msg)
     
-    # Итеративно выполняем сделки
+    # Ищем встречные ордера
+    if order.side == models.OrderSide.BUY:
+        # Для покупки ищем ордера на продажу
+        counter_orders_query = (
+            db.query(models.Order)
+            .filter(
+                models.Order.ticker == order.ticker,
+                models.Order.side == models.OrderSide.SELL,
+                models.Order.status.in_([models.OrderStatus.OPEN]),
+                models.Order.quantity > models.Order.filled_quantity
+            )
+        )
+        
+        if order.order_type == models.OrderType.LIMIT:
+            # Для лимитного ордера на покупку берем только ордера с ценой <= нашей
+            counter_orders_query = counter_orders_query.filter(
+                models.Order.price <= order.price
+            )
+        
+        counter_orders = counter_orders_query.order_by(
+            asc(models.Order.price),
+            asc(models.Order.created_at)
+        ).all()
+        
+    else:  # SELL
+        # Для продажи ищем ордера на покупку
+        counter_orders_query = (
+            db.query(models.Order)
+            .filter(
+                models.Order.ticker == order.ticker,
+                models.Order.side == models.OrderSide.BUY,
+                models.Order.status.in_([models.OrderStatus.OPEN]),
+                models.Order.quantity > models.Order.filled_quantity
+            )
+        )
+        
+        if order.order_type == models.OrderType.LIMIT:
+            # Для лимитного ордера на продажу берем только ордера с ценой >= нашей
+            counter_orders_query = counter_orders_query.filter(
+                models.Order.price >= order.price
+            )
+        
+        counter_orders = counter_orders_query.order_by(
+            desc(models.Order.price),
+            asc(models.Order.created_at)
+        ).all()
+    
+    if order.order_type == models.OrderType.MARKET and not counter_orders:
+        raise ValueError("Нет встречных заявок для исполнения рыночного ордера")
+    
+    # Выполняем матчинг
     for counter_order in counter_orders:
-        # Если наш ордер уже полностью исполнен, выходим
+        # Проверяем, не исполнен ли уже наш ордер
         if order.filled_quantity >= order.quantity:
             break
         
@@ -449,49 +460,47 @@ def execute_matching(db: Session, order_id: str):
         # Определяем объем сделки
         order_remaining = order.quantity - order.filled_quantity
         counter_remaining = counter_order.quantity - counter_order.filled_quantity
-        deal_quantity = min(order_remaining, counter_remaining)
         
-        # Определяем цену сделки (берем цену ранее размещенного ордера)
-        deal_price = counter_order.price
+        if counter_remaining <= 0:
+            continue
+            
+        deal_quantity = min(order_remaining, counter_remaining)
+        deal_price = counter_order.price  # Берем цену из встречного ордера
         
         # Выполняем сделку
         execute_deal(db, order, counter_order, deal_quantity, deal_price)
-    
-    # Проверяем, полностью ли исполнен ордер
+        
+        # Обновляем статусы ордеров
+        if counter_order.filled_quantity >= counter_order.quantity:
+            counter_order.status = models.OrderStatus.FILLED
+            counter_order.updated_at = datetime.datetime.utcnow()
+            
+    # Завершаем обработку основного ордера
     order_remaining = order.quantity - order.filled_quantity
     
-    # Обновляем статус ордера
     if order_remaining == 0:
         order.status = models.OrderStatus.FILLED
     elif order.filled_quantity > 0:
         order.status = models.OrderStatus.PARTIALLY_FILLED
+    elif order.order_type == models.OrderType.MARKET:
+        # Рыночный ордер отменяется, если не был исполнен
+        order.status = models.OrderStatus.CANCELLED
     
-    # Для рыночных ордеров, если остался неисполненный объем, отменяем его
-    if order.order_type == models.OrderType.MARKET and order_remaining > 0:
-        order.status = models.OrderStatus.CANCELLED if order.filled_quantity == 0 else models.OrderStatus.PARTIALLY_FILLED
+    order.updated_at = datetime.datetime.utcnow()
+    db.commit()
     
-    if order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
-        refund_quantity = order.quantity - order.filled_quantity
-        if refund_quantity > 0:
-            refund_amount = refund_quantity * order.price
+    # Возвращаем неиспользованные средства
+    if order_remaining > 0:
+        if order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
+            # Возвращаем неиспользованные рубли
+            refund_amount = order_remaining * order.price
             rub_balance = db.query(models.Balance).filter(
                 models.Balance.user_id == order.user_id,
                 models.Balance.ticker == "RUB"
             ).first()
             if rub_balance:
                 rub_balance.amount += refund_amount
-
-    if order.side == models.OrderSide.SELL and order.order_type == models.OrderType.LIMIT:
-        refund_quantity = order.quantity - order.filled_quantity
-        if refund_quantity > 0:
-            asset_balance = db.query(models.Balance).filter(
-                models.Balance.user_id == order.user_id,
-                models.Balance.ticker == order.ticker
-            ).first()
-            if asset_balance:
-                asset_balance.amount += refund_quantity
-    
-    db.commit()
+                db.commit()
 
 def execute_deal(db: Session, order: models.Order, counter_order: models.Order, quantity: Decimal, price: Decimal):
     """
@@ -584,25 +593,33 @@ def cancel_order_and_return_funds(db: Session, order_id: str):
     if not order:
         return
     
-    # Проверяем, можно ли отменить ордер
+    # Для отмены доступны только OPEN и PARTIALLY_FILLED ордера
     if order.status not in [models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]:
         return
     
-    remaining_quantity = order.quantity - order.filled_quantity
+    # Устанавливаем статус в зависимости от наличия исполненной части
+    order.status = (
+        models.OrderStatus.CANCELLED if order.filled_quantity == 0
+        else models.OrderStatus.PARTIALLY_FILLED
+    )
+    order.updated_at = datetime.datetime.utcnow()
     
+    # Возвращаем неиспользованные средства
+    remaining_quantity = order.quantity - order.filled_quantity
     if remaining_quantity > 0:
-        if order.side == models.OrderSide.BUY:
-            # Возвращаем рубли только для лимитных ордеров
-            if order.order_type == models.OrderType.LIMIT and order.price is not None:
+        if order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
+            # Возвращаем зарезервированные рубли для лимитного ордера на покупку
+            if order.price is not None:
+                refund_amount = remaining_quantity * order.price
                 rub_balance = db.query(models.Balance).filter(
                     models.Balance.user_id == order.user_id,
                     models.Balance.ticker == "RUB"
                 ).first()
                 if rub_balance:
-                    rub_balance.amount += remaining_quantity * order.price
-                    
+                    rub_balance.amount += refund_amount
+        
         elif order.side == models.OrderSide.SELL:
-            # Возвращаем актив
+            # Возвращаем зарезервированный актив для ордера на продажу
             asset_balance = db.query(models.Balance).filter(
                 models.Balance.user_id == order.user_id,
                 models.Balance.ticker == order.ticker
@@ -610,13 +627,6 @@ def cancel_order_and_return_funds(db: Session, order_id: str):
             if asset_balance:
                 asset_balance.amount += remaining_quantity
     
-    # Устанавливаем правильный статус
-    order.status = (
-        models.OrderStatus.CANCELLED if order.filled_quantity == 0 
-        else models.OrderStatus.PARTIALLY_FILLED
-    )
-    
-    order.updated_at = datetime.datetime.utcnow()
     db.commit()
 
 def get_reserved_balance(db: Session, user_id: str, ticker: str) -> Decimal:
