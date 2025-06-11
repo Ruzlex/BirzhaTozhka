@@ -148,7 +148,7 @@ def create_order(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Нет доступных средств. Весь баланс зарезервирован в других ордерах."
             )
-        
+
         # Для лимитного ордера проверяем точную сумму
         if order_type == schemas.OrderType.LIMIT:
             required_amount = order.price * order.quantity
@@ -173,7 +173,7 @@ def create_order(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=error_msg
                 )
-            if available_rub < estimated_cost:
+            if estimated_cost > 0 and available_rub < estimated_cost:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
@@ -186,6 +186,7 @@ def create_order(
                 )
 
     else:  # SELL
+        # Проверяем баланс актива
         asset_balance = db.query(models.Balance).filter(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
@@ -218,6 +219,17 @@ def create_order(
                     f"доступно: {available_asset}"
                 )
             )
+
+        # Для рыночного ордера проверяем возможность исполнения
+        if order_type == schemas.OrderType.MARKET:
+            can_execute, error_msg, _ = check_market_order_executable(
+                db, order.ticker, order.side, order.quantity
+            )
+            if not can_execute:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=error_msg
+                )
     
     # Создаем новый ордер
     new_order = models.Order(
@@ -670,7 +682,8 @@ def check_market_order_executable(
     ).order_by(price_order(models.Order.price)).all()
 
     if not counter_orders:
-        return False, f"Невозможно исполнить рыночный ордер - нет активных встречных заявок", Decimal(0)
+        side_str = "покупки" if counter_side == models.OrderSide.BUY else "продажи"
+        return False, f"Нет активных ордеров на {side_str} для исполнения рыночного ордера", Decimal(0)
 
     available_volume = sum(
         order.quantity - order.filled_quantity 
@@ -678,9 +691,9 @@ def check_market_order_executable(
     )
     
     if available_volume < quantity:
+        side_str = "предложений" if side == models.OrderSide.BUY else "спроса"
         return False, (
-            f"Невозможно исполнить рыночный ордер - недостаточно "
-            f"{'предложений' if side == models.OrderSide.BUY else 'спроса'}. "
+            f"Недостаточно {side_str} для исполнения рыночного ордера. "
             f"Запрошено: {quantity}, доступно: {available_volume}"
         ), Decimal(0)
 
