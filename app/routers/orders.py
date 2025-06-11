@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, asc
+from sqlalchemy import desc, asc, func
 from typing import List, Optional
 from decimal import Decimal
 from .. import schemas, models
@@ -101,10 +101,6 @@ def create_order(
 ):
     """
     Создать новую заявку на покупку или продажу.
-    
-    Тип ордера определяется автоматически по наличию цены:
-    - Если цена указана (не NULL), создается лимитный ордер
-    - Если цена не указана (NULL), создается рыночный ордер, цена будет определена при исполнении
     """
     # Проверяем, что инструмент существует
     instrument = db.query(models.Instrument).filter(models.Instrument.ticker == order.ticker).first()
@@ -113,113 +109,145 @@ def create_order(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Инструмент с тикером {order.ticker} не найден"
         )
-    
+
     # Определяем тип ордера на основе наличия цены
     order_type = order.order_type
-    
-    # Базовая валюта системы - RUB
-    rub_instrument = db.query(models.Instrument).filter(models.Instrument.ticker == "RUB").first()
-    if not rub_instrument:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Базовая валюта RUB не найдена в системе"
-        )
-    
-    # Проверяем достаточность средств с учетом зарезервированных
-    if order.side == schemas.OrderSide.BUY:
-        # Находим рублевый баланс пользователя
-        rub_balance = db.query(models.Balance).filter(
-            models.Balance.user_id == current_user.id,
-            models.Balance.ticker == "RUB"
-        ).first()
-        
-        if not rub_balance:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="У вас нет баланса в RUB"
-            )
-            
-        # Получаем сумму, зарезервированную в других ордерах на покупку
-        reserved_rub = get_reserved_balance(db, current_user.id, "RUB")
-        available_rub = rub_balance.amount - reserved_rub
-        
-        if available_rub <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Нет доступных средств. Весь баланс зарезервирован в других ордерах."
-            )
-        
-        # Для лимитного ордера проверяем точную сумму
-        if order_type == schemas.OrderType.LIMIT:
-            required_amount = order.price * order.quantity
-            if available_rub < required_amount:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Недостаточно средств. "
-                        f"Требуется: {required_amount} RUB, "
-                        f"всего на балансе: {rub_balance.amount} RUB, "
-                        f"зарезервировано: {reserved_rub} RUB, "
-                        f"доступно: {available_rub} RUB"
-                    )
-                )
-        # Для рыночного ордера проверяем возможность исполнения
-        else:
-            can_execute, error_msg, estimated_cost = check_market_order_executable(
-                db, order.ticker, order.side, order.quantity
-            )
-            if not can_execute:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=error_msg
-                )
-            if available_rub < estimated_cost:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Недостаточно средств для рыночной покупки. "
-                        f"Требуется примерно: {estimated_cost} RUB, "
-                        f"всего на балансе: {rub_balance.amount} RUB, "
-                        f"зарезервировано: {reserved_rub} RUB, "
-                        f"доступно: {available_rub} RUB"
-                    )
-                )
 
-    else:  # SELL
-        asset_balance = db.query(models.Balance).filter(
+    # Проверяем баланс и резервирование
+    if order.side == schemas.OrderSide.SELL:
+        # Проверяем баланс актива для продажи
+        balance = db.query(models.Balance).filter(
             models.Balance.user_id == current_user.id,
             models.Balance.ticker == order.ticker
         ).first()
-        
-        if not asset_balance:
+
+        if not balance:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"У вас нет баланса в {order.ticker}"
             )
-            
-        # Получаем сумму, зарезервированную в других ордерах на продажу
-        reserved_asset = get_reserved_balance(db, current_user.id, order.ticker)
-        available_asset = asset_balance.amount - reserved_asset
-        
-        if available_asset <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Нет доступных {order.ticker}. Весь баланс зарезервирован в других ордерах."
-            )
 
-        if available_asset < order.quantity:
+        # Получаем сумму в активных ордерах
+        reserved = db.query(models.Order).filter(
+            models.Order.user_id == current_user.id,
+            models.Order.ticker == order.ticker,
+            models.Order.side == schemas.OrderSide.SELL,
+            models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+        ).with_entities(
+            func.sum(models.Order.quantity - models.Order.filled_quantity)
+        ).scalar() or Decimal('0')
+
+        available = balance.amount - reserved
+
+        if available < order.quantity:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"Недостаточно {order.ticker}. "
-                    f"Требуется: {order.quantity}, "
-                    f"всего на балансе: {asset_balance.amount}, "
-                    f"зарезервировано: {reserved_asset}, "
-                    f"доступно: {available_asset}"
+                    f"Недостаточно {order.ticker} для создания ордера. "
+                    f"Всего: {balance.amount}, "
+                    f"Зарезервировано: {reserved}, "
+                    f"Доступно: {available}, "
+                    f"Требуется: {order.quantity}"
                 )
             )
-    
-    # Создаем новый ордер
+    else:  # BUY
+        # Проверяем баланс RUB для покупки
+        balance = db.query(models.Balance).filter(
+            models.Balance.user_id == current_user.id,
+            models.Balance.ticker == "RUB"
+        ).first()
+
+        if not balance:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="У вас нет баланса в RUB"
+            )
+
+        if order_type == schemas.OrderType.LIMIT:
+            # Для лимитного ордера проверяем точную сумму
+            required = order.quantity * order.price
+
+            # Получаем сумму в активных ордерах на покупку
+            reserved = db.query(models.Order).filter(
+                models.Order.user_id == current_user.id,
+                models.Order.side == schemas.OrderSide.BUY,
+                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+            ).with_entities(
+                func.sum((models.Order.quantity - models.Order.filled_quantity) * models.Order.price)
+            ).scalar() or Decimal('0')
+
+            available = balance.amount - reserved
+
+            if available < required:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Недостаточно RUB для создания ордера. "
+                        f"Всего: {balance.amount}, "
+                        f"Зарезервировано: {reserved}, "
+                        f"Доступно: {available}, "
+                        f"Требуется: {required}"
+                    )
+                )
+        else:  # MARKET
+            # Проверяем наличие встречных ордеров
+            sell_orders = db.query(models.Order).filter(
+                models.Order.ticker == order.ticker,
+                models.Order.side == models.OrderSide.SELL,
+                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
+                (models.Order.quantity - models.Order.filled_quantity) > 0
+            ).order_by(asc(models.Order.price)).all()
+
+            if not sell_orders:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Нет активных ордеров на продажу"
+                )
+
+            # Считаем максимальную возможную стоимость
+            estimated_cost = Decimal('0')
+            remaining_quantity = order.quantity
+            
+            for sell_order in sell_orders:
+                available_qty = sell_order.quantity - sell_order.filled_quantity
+                matched_qty = min(remaining_quantity, available_qty)
+                estimated_cost += matched_qty * sell_order.price
+                remaining_quantity -= matched_qty
+                
+                if remaining_quantity <= 0:
+                    break
+
+            if remaining_quantity > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Недостаточно предложений для покупки {order.quantity} {order.ticker}"
+                )
+
+            # Получаем сумму в активных ордерах на покупку
+            reserved = db.query(models.Order).filter(
+                models.Order.user_id == current_user.id,
+                models.Order.side == schemas.OrderSide.BUY,
+                models.Order.order_type == models.OrderType.LIMIT,
+                models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
+            ).with_entities(
+                func.sum((models.Order.quantity - models.Order.filled_quantity) * models.Order.price)
+            ).scalar() or Decimal('0')
+
+            available = balance.amount - reserved
+
+            if available < estimated_cost:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Недостаточно RUB для создания рыночного ордера. "
+                        f"Всего: {balance.amount}, "
+                        f"Зарезервировано: {reserved}, "
+                        f"Доступно: {available}, "
+                        f"Примерная стоимость: {estimated_cost}"
+                    )
+                )
+
+    # Если все проверки пройдены, создаем ордер
     new_order = models.Order(
         user_id=current_user.id,
         instrument_id=instrument.id,
@@ -227,7 +255,7 @@ def create_order(
         order_type=order_type,
         side=order.side,
         quantity=order.quantity,
-        price=order.price,  # Для рыночного ордера price будет None
+        price=order.price,
         filled_quantity=0,
         status=models.OrderStatus.OPEN
     )
@@ -236,34 +264,16 @@ def create_order(
     db.commit()
     db.refresh(new_order)
     
-    # Резервируем средства
-    if order.side == schemas.OrderSide.BUY and order_type == schemas.OrderType.LIMIT:
-        # Резервируем рубли для лимитного ордера на покупку
-        rub_balance.amount -= order.price * order.quantity
-        db.commit()
-    elif order.side == schemas.OrderSide.SELL:
-        # Резервируем актив при продаже (для любого типа ордера)
-        asset_balance.amount -= order.quantity
-        db.commit()
-    
-    # Выполняем матчинг ордера
+    # После создания ордера пытаемся его исполнить
     try:
         execute_matching(db, new_order.id)
-    except ValueError as e:
+    except Exception as e:
+        # В случае ошибки отменяем ордер
         cancel_order_and_return_funds(db, new_order.id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except Exception as e:
-        cancel_order_and_return_funds(db, new_order.id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Внутренняя ошибка при исполнении ордера: {str(e)}"
-        )
-    
-    # Перезагружаем ордер, чтобы получить актуальный статус после матчинга
-    db.refresh(new_order)
     
     return {"success": True, "order_id": new_order.id}
 
@@ -397,7 +407,7 @@ def execute_matching(db: Session, order_id: str):
     # Для лимитных - только с подходящей ценой
     if order.side == models.OrderSide.BUY:
         # Ищем заявки на продажу
-        if order.order_type == models.OrderType.LIMIT:
+        if order.order_type == schemas.OrderType.LIMIT:
             # Для лимитного ордера на покупку подходят заявки на продажу с ценой <= цены ордера
             counter_orders = db.query(models.Order).filter(
                 models.Order.ticker == order.ticker,
@@ -416,7 +426,7 @@ def execute_matching(db: Session, order_id: str):
                 raise ValueError(f"Нет встречных заявок для исполнения рыночного ордера {order.id}")
     else:
         # Ищем заявки на покупку
-        if order.order_type == models.OrderType.LIMIT:
+        if order.order_type == schemas.OrderType.LIMIT:
             # Для лимитного ордера на продажу подходят заявки на покупку с ценой >= цены ордера
             counter_orders = db.query(models.Order).filter(
                 models.Order.ticker == order.ticker,
@@ -432,7 +442,7 @@ def execute_matching(db: Session, order_id: str):
                 models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED])
             ).order_by(desc(models.Order.price)).all()
 
-        if order.order_type == models.OrderType.MARKET and not counter_orders:
+        if order.order_type == schemas.OrderType.MARKET and not counter_orders:
             raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Нет встречных заявок для исполнения рыночного ордера {order.id}"
@@ -469,7 +479,7 @@ def execute_matching(db: Session, order_id: str):
         order.status = models.OrderStatus.PARTIALLY_FILLED
     
     # Для рыночных ордеров, если остался неисполненный объем, отменяем его
-    if order.order_type == models.OrderType.MARKET and order_remaining > 0:
+    if order.order_type == schemas.OrderType.MARKET and order_remaining > 0:
         order.status = models.OrderStatus.CANCELLED if order.filled_quantity == 0 else models.OrderStatus.PARTIALLY_FILLED
     
     if order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
