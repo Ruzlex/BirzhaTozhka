@@ -134,10 +134,11 @@ def create_order(
         ).first()
         
         if not rub_balance or rub_balance.amount <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Недостаточно средств для покупки"
-            )
+            if order_type == schemas.OrderType.LIMIT:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Недостаточно средств для покупки"
+                )
             
         # Получаем сумму, зарезервированную в других ордерах на покупку
         reserved_rub = get_reserved_balance(db, current_user.id, "RUB")
@@ -171,15 +172,8 @@ def create_order(
             if not can_execute:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=error_msg
+                    detail="Нет встречных заявок для исполнения рыночного ордера"
                 )
-            # Проверяем, что хватает средств для покупки, если есть оценка стоимости
-            if estimated_cost > 0:
-                if available_rub < estimated_cost:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Недостаточно средств для покупки"
-                    )
 
     else:  # SELL
         # Проверяем баланс актива
@@ -224,7 +218,7 @@ def create_order(
             if not can_execute:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=error_msg
+                    detail="Нет встречных заявок для исполнения рыночного ордера"
                 )
     
     # Создаем новый ордер
