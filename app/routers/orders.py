@@ -133,10 +133,10 @@ def create_order(
             models.Balance.ticker == "RUB"
         ).first()
         
-        if not rub_balance:
+        if not rub_balance or rub_balance.amount <= 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="У вас нет баланса в RUB"
+                detail="Недостаточно средств для покупки"
             )
             
         # Получаем сумму, зарезервированную в других ордерах на покупку
@@ -173,17 +173,13 @@ def create_order(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=error_msg
                 )
-            if estimated_cost > 0 and available_rub < estimated_cost:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Недостаточно средств для рыночной покупки. "
-                        f"Требуется примерно: {estimated_cost} RUB, "
-                        f"всего на балансе: {rub_balance.amount} RUB, "
-                        f"зарезервировано: {reserved_rub} RUB, "
-                        f"доступно: {available_rub} RUB"
+            # Проверяем, что хватает средств для покупки, если есть оценка стоимости
+            if estimated_cost > 0:
+                if available_rub < estimated_cost:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Недостаточно средств для покупки"
                     )
-                )
 
     else:  # SELL
         # Проверяем баланс актива
@@ -670,20 +666,20 @@ def check_market_order_executable(
     Проверяет возможность исполнения рыночного ордера.
     Возвращает (можно_исполнить, сообщение_об_ошибке, расчетная_стоимость)
     """
-    counter_side = models.OrderSide.SELL if side == models.OrderSide.BUY else models.OrderSide.BUY
+    opposite_side = models.OrderSide.SELL if side == models.OrderSide.BUY else models.OrderSide.BUY
     price_order = asc if side == models.OrderSide.BUY else desc
     
     # Получаем все встречные ордера с положительным остатком
     counter_orders = db.query(models.Order).filter(
         models.Order.ticker == ticker,
-        models.Order.side == counter_side,
+        models.Order.side == opposite_side,
         models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
-        (models.Order.quantity - models.Order.filled_quantity) > 0  # Добавляем проверку на положительный остаток
+        (models.Order.quantity - models.Order.filled_quantity) > 0
     ).order_by(price_order(models.Order.price)).all()
 
     if not counter_orders:
-        side_str = "покупки" if counter_side == models.OrderSide.BUY else "продажи"
-        return False, f"Нет активных ордеров на {side_str} для исполнения рыночного ордера", Decimal(0)
+        error_msg = "Нет встречных заявок для исполнения рыночного ордера"
+        return False, error_msg, Decimal(0)
 
     available_volume = sum(
         order.quantity - order.filled_quantity 
