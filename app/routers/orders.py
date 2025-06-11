@@ -35,12 +35,11 @@ def get_orderbook(
         models.Order.ticker == ticker,
         models.Order.side == models.OrderSide.BUY,
         models.Order.order_type == models.OrderType.LIMIT,
-        models.Order.status == models.OrderStatus.OPEN,  # Только OPEN ордера
-        models.Order.price.isnot(None),  # Только ордера с ценой
-        models.Order.quantity > models.Order.filled_quantity  # С остатком
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
+        models.Order.quantity > models.Order.filled_quantity
     ).order_by(
-        desc(models.Order.price),  # Сначала высшие цены
-        asc(models.Order.created_at)  # При равной цене - старые ордера первые
+        desc(models.Order.price),
+        asc(models.Order.created_at)
     ).all()
 
     # Получаем активные лимитные ордера на продажу (ASK)
@@ -48,42 +47,47 @@ def get_orderbook(
         models.Order.ticker == ticker,
         models.Order.side == models.OrderSide.SELL,
         models.Order.order_type == models.OrderType.LIMIT,
-        models.Order.status == models.OrderStatus.OPEN,  # Только OPEN ордера
-        models.Order.price.isnot(None),  # Только ордера с ценой
-        models.Order.quantity > models.Order.filled_quantity  # С остатком
+        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
+        models.Order.quantity > models.Order.filled_quantity
     ).order_by(
-        asc(models.Order.price),  # Сначала низшие цены
-        asc(models.Order.created_at)  # При равной цене - старые ордера первые
+        asc(models.Order.price),
+        asc(models.Order.created_at)
     ).all()
 
     # Агрегируем объемы по ценам для покупок (BID)
     bid_levels = {}
     for order in buy_orders:
-        remaining_qty = order.quantity - order.filled_quantity
-        if remaining_qty <= 0:
+        if order.price is None:  # Пропускаем ордера без цены
             continue
-        if order.price not in bid_levels:
-            bid_levels[order.price] = Decimal('0')
-        bid_levels[order.price] += remaining_qty
+        remaining_qty = order.quantity - order.filled_quantity
+        if remaining_qty <= 0:  # Пропускаем полностью исполненные
+            continue
+        price_key = Decimal(str(order.price))  # Конвертируем в Decimal для точности
+        if price_key not in bid_levels:
+            bid_levels[price_key] = Decimal('0')
+        bid_levels[price_key] += remaining_qty
 
     # Агрегируем объемы по ценам для продаж (ASK)
     ask_levels = {}
     for order in sell_orders:
-        remaining_qty = order.quantity - order.filled_quantity
-        if remaining_qty <= 0:
+        if order.price is None:  # Пропускаем ордера без цены
             continue
-        if order.price not in ask_levels:
-            ask_levels[order.price] = Decimal('0')
-        ask_levels[order.price] += remaining_qty
+        remaining_qty = order.quantity - order.filled_quantity
+        if remaining_qty <= 0:  # Пропускаем полностью исполненные
+            continue
+        price_key = Decimal(str(order.price))  # Конвертируем в Decimal для точности
+        if price_key not in ask_levels:
+            ask_levels[price_key] = Decimal('0')
+        ask_levels[price_key] += remaining_qty
 
-    # Формируем уровни цен, отсортированные в правильном порядке
+    # Формируем и сортируем уровни
     sorted_bids = sorted(
         [
             schemas.Level(price=price, qty=qty)
             for price, qty in bid_levels.items()
             if qty > 0
         ],
-        key=lambda x: (-x.price, -x.qty)  # Сортируем по убыванию цены, при равных ценах - по убыванию объема
+        key=lambda x: (-x.price, -x.qty)
     )[:limit]
 
     sorted_asks = sorted(
@@ -92,7 +96,7 @@ def get_orderbook(
             for price, qty in ask_levels.items()
             if qty > 0
         ],
-        key=lambda x: (x.price, -x.qty)  # Сортируем по возрастанию цены, при равных ценах - по убыванию объема
+        key=lambda x: (x.price, -x.qty)
     )[:limit]
 
     return schemas.OrderBookOut(
@@ -339,41 +343,22 @@ def cancel_order(
     if remaining_quantity > 0:
         if order.side == models.OrderSide.BUY:
             # Возвращаем рубли только для лимитных ордеров
-            if order.order_type == models.OrderType.LIMIT:
-                if order.price is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Ордер типа LIMIT не содержит цену"
-                    )
+            if order.order_type == models.OrderType.LIMIT and order.price is not None:
                 rub_balance = db.query(models.Balance).filter(
                     models.Balance.user_id == current_user.id,
                     models.Balance.ticker == "RUB"
                 ).first()
-                if not rub_balance:
-                    rub_balance = models.Balance(
-                        user_id=current_user.id,
-                        ticker="RUB",
-                        amount=0
-                    )
-                    db.add(rub_balance)
-                    db.flush()
-                rub_balance.amount += remaining_quantity * order.price
-
+                if rub_balance:
+                    rub_balance.amount += remaining_quantity * order.price
+                    
         elif order.side == models.OrderSide.SELL:
             # Возвращаем актив
             asset_balance = db.query(models.Balance).filter(
                 models.Balance.user_id == current_user.id,
                 models.Balance.ticker == order.ticker
             ).first()
-            if not asset_balance:
-                asset_balance = models.Balance(
-                    user_id=current_user.id,
-                    ticker=order.ticker,
-                    amount=0
-                )
-                db.add(asset_balance)
-                db.flush()
-            asset_balance.amount += remaining_quantity
+            if asset_balance:
+                asset_balance.amount += remaining_quantity
     
     # Отмечаем ордер как отмененный
     order.status = models.OrderStatus.CANCELLED
@@ -599,43 +584,39 @@ def cancel_order_and_return_funds(db: Session, order_id: str):
     if not order:
         return
     
+    # Проверяем, можно ли отменить ордер
+    if order.status not in [models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]:
+        return
+    
     remaining_quantity = order.quantity - order.filled_quantity
     
     if remaining_quantity > 0:
-        if order.side == models.OrderSide.BUY and order.order_type == models.OrderType.LIMIT:
-            # Возвращаем рубли
-            rub_balance = db.query(models.Balance).filter(
-                models.Balance.user_id == order.user_id,
-                models.Balance.ticker == "RUB"
-            ).first()
-            if not rub_balance:
-                rub_balance = models.Balance(
-                    user_id=order.user_id,
-                    ticker="RUB",
-                    amount=0
-                )
-                db.add(rub_balance)
-                db.flush()
-            rub_balance.amount += remaining_quantity * order.price
+        if order.side == models.OrderSide.BUY:
+            # Возвращаем рубли только для лимитных ордеров
+            if order.order_type == models.OrderType.LIMIT and order.price is not None:
+                rub_balance = db.query(models.Balance).filter(
+                    models.Balance.user_id == order.user_id,
+                    models.Balance.ticker == "RUB"
+                ).first()
+                if rub_balance:
+                    rub_balance.amount += remaining_quantity * order.price
+                    
         elif order.side == models.OrderSide.SELL:
             # Возвращаем актив
             asset_balance = db.query(models.Balance).filter(
                 models.Balance.user_id == order.user_id,
                 models.Balance.ticker == order.ticker
             ).first()
-            if not asset_balance:
-                asset_balance = models.Balance(
-                    user_id=order.user_id,
-                    ticker=order.ticker,
-                    amount=0
-                )
-                db.add(asset_balance)
-                db.flush()
-            asset_balance.amount += remaining_quantity
+            if asset_balance:
+                asset_balance.amount += remaining_quantity
     
-    order.status = models.OrderStatus.CANCELLED
+    # Устанавливаем правильный статус
+    order.status = (
+        models.OrderStatus.CANCELLED if order.filled_quantity == 0 
+        else models.OrderStatus.PARTIALLY_FILLED
+    )
+    
     order.updated_at = datetime.datetime.utcnow()
-    
     db.commit()
 
 def get_reserved_balance(db: Session, user_id: str, ticker: str) -> Decimal:
