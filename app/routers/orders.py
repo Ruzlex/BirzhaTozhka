@@ -19,10 +19,7 @@ def get_orderbook(
 ):
     """
     Получить текущий биржевой стакан (книгу заявок) для указанного инструмента.
-    Возвращает списки активных заявок на покупку (bids) и продажу (asks),
-    отсортированные по наиболее выгодной цене.
     """
-    # Проверяем, что инструмент существует
     instrument = db.query(models.Instrument).filter(models.Instrument.ticker == ticker).first()
     if not instrument:
         raise HTTPException(
@@ -30,60 +27,66 @@ def get_orderbook(
             detail=f"Инструмент с тикером {ticker} не найден"
         )
     
-    # Получаем активные ордера на покупку с положительным остатком
-    buy_orders = db.query(models.Order).filter(
-        models.Order.ticker == ticker,
-        models.Order.side == models.OrderSide.BUY,
-        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
-        (models.Order.quantity - models.Order.filled_quantity) > 0  # Добавляем проверку на положительный остаток
-    ).all()
+    # Базовый запрос для обоих типов ордеров
+    base_query = (
+        db.query(models.Order)
+        .filter(
+            models.Order.ticker == ticker,
+            models.Order.order_type == models.OrderType.LIMIT,  # Только лимитные ордера
+            models.Order.status == models.OrderStatus.OPEN,     # Только открытые
+            models.Order.price.isnot(None),                     # Цена должна быть указана
+            (models.Order.quantity - models.Order.filled_quantity) > 0  # Должен быть остаток
+        )
+    )
+    
+    # Получаем ордера на покупку
+    buy_orders = (
+        base_query
+        .filter(models.Order.side == models.OrderSide.BUY)
+        .order_by(desc(models.Order.price), asc(models.Order.created_at))
+        .all()
+    )
 
-    # Получаем активные ордера на продажу с положительным остатком
-    sell_orders = db.query(models.Order).filter(
-        models.Order.ticker == ticker,
-        models.Order.side == models.OrderSide.SELL,
-        models.Order.status.in_([models.OrderStatus.OPEN, models.OrderStatus.PARTIALLY_FILLED]),
-        (models.Order.quantity - models.Order.filled_quantity) > 0  # Добавляем проверку на положительный остаток
-    ).all()
+    # Получаем ордера на продажу
+    sell_orders = (
+        base_query
+        .filter(models.Order.side == models.OrderSide.SELL)
+        .order_by(asc(models.Order.price), asc(models.Order.created_at))
+        .all()
+    )
 
-    # Агрегируем объемы по ценам для покупок
+    # Агрегируем ордера по ценовым уровням
     bid_levels = {}
-    for order in buy_orders:
-        remaining_qty = order.quantity - order.filled_quantity
-        if remaining_qty <= 0:
-            continue
-        if order.price not in bid_levels:
-            bid_levels[order.price] = Decimal('0')
-        bid_levels[order.price] += remaining_qty
-
-    # Агрегируем объемы по ценам для продаж
     ask_levels = {}
-    for order in sell_orders:
-        remaining_qty = order.quantity - order.filled_quantity
-        if remaining_qty <= 0:
+
+    # Агрегация ордеров на покупку
+    for order in buy_orders:
+        price = Decimal(str(order.price))
+        qty = order.quantity - order.filled_quantity
+        if qty <= 0:
             continue
-        if order.price not in ask_levels:
-            ask_levels[order.price] = Decimal('0')
-        ask_levels[order.price] += remaining_qty
+        bid_levels[price] = bid_levels.get(price, Decimal('0')) + qty
 
-    # Сортируем уровни и применяем лимит
-    sorted_bids = sorted(
-        [
-            schemas.Level(price=price, qty=qty)
-            for price, qty in bid_levels.items()
-            if qty > 0  # Дополнительная проверка на положительный объем
-        ],
-        key=lambda x: (-x.price, -x.qty)  # Сортируем по убыванию цены, при равных ценах - по убыванию объема
-    )[:limit]
+    # Агрегация ордеров на продажу
+    for order in sell_orders:
+        price = Decimal(str(order.price))
+        qty = order.quantity - order.filled_quantity
+        if qty <= 0:
+            continue
+        ask_levels[price] = ask_levels.get(price, Decimal('0')) + qty
 
-    sorted_asks = sorted(
-        [
-            schemas.Level(price=price, qty=qty)
-            for price, qty in ask_levels.items()
-            if qty > 0  # Дополнительная проверка на положительный объем
-        ],
-        key=lambda x: (x.price, -x.qty)  # Сортируем по возрастанию цены, при равных ценах - по убыванию объема
-    )[:limit]
+    # Формируем отсортированные списки уровней
+    sorted_bids = [
+        schemas.Level(price=price, qty=qty)
+        for price, qty in sorted(bid_levels.items(), key=lambda x: (-x[0], -x[1]))
+        if qty > 0
+    ][:limit]
+
+    sorted_asks = [
+        schemas.Level(price=price, qty=qty)
+        for price, qty in sorted(ask_levels.items(), key=lambda x: (x[0], -x[1]))
+        if qty > 0
+    ][:limit]
 
     return schemas.OrderBookOut(
         bid_levels=sorted_bids,
