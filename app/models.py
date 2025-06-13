@@ -17,9 +17,9 @@ class OrderSide(str, enum.Enum):
     SELL = "SELL"
 
 class OrderStatus(str, enum.Enum):
-    OPEN = "OPEN"
-    PARTIALLY_FILLED = "PARTIALLY_FILLED"
-    FILLED = "FILLED"
+    NEW = "NEW"
+    PARTIALLY_EXECUTED = "PARTIALLY_EXECUTED"
+    EXECUTED = "EXECUTED"
     CANCELLED = "CANCELLED"
 
 class User(Base):
@@ -82,7 +82,7 @@ class Order(Base):
     price = Column(Numeric(precision=18, scale=8), nullable=True)  # NULL для Market ордеров
     filled_quantity = Column(Numeric(precision=18, scale=8), default=0)
     
-    status = Column(Enum(OrderStatus), default=OrderStatus.OPEN)
+    status = Column(Enum(OrderStatus), default=OrderStatus.NEW)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     
